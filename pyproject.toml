@@ -19,8 +19,12 @@ exclude = '''
 # unrooted paths here
 | __pycache__/
 '''
+# In different versions of black, there were 3 different ways to turn on
+# the same thing - splitting up of long string literals
 experimental-string-processing = true
 preview = true
+enable-unstable-feature = ['string_processing']
+
 line-length = 88
 
 [tool.isort]
@@ -32,5 +36,5 @@ line_length = 88
 [tool.ruff]
 line-length = 88
 ignore = [
-    "E402",  # Module level import not at top of file
+    "E402", # Module level import not at top of file
 ]
