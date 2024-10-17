@@ -11,3 +11,6 @@ ignore =
     # W503 = line break before binary operator - black will break (long_condition and other_long_condition)
     #   in a way that this check doesn't like
     W503,
+    # Black will autoformat let black auto-format "empty ellipsis functions like `def foo(): ...` onto one line,
+    # so turn off the flake8 warning for this
+    E704,
