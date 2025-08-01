@@ -21,7 +21,7 @@ exclude = '''
 '''
 # In different versions of black, there were 3 different ways to turn on
 # the same thing - splitting up of long string literals
-experimental-string-processing = true
+# experimental-string-processing = true  # raises a warning in modern black versions
 preview = true
 enable-unstable-feature = ['string_processing']
 
