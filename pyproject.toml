@@ -38,3 +38,35 @@ line-length = 88
 ignore = [
     "E402", # Module level import not at top of file
 ]
+
+[tool.pylint.main]
+ignore = [
+    ".DS_Store",
+    ".conan",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".vs",
+    ".vscode",
+    "__pycache__",
+    "CVS",
+]
+ignore-paths = ["^\\.tox/.*$", "^\\.venv/.*$", "^\\_venv/.*$"]
+
+[tool.pylint."messages control"]
+disable = [
+    "import-outside-toplevel",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "subprocess-run-check",
+    "wrong-import-position",
+    # Until VSCode linting respects the .env file (or has some other way to add paths), "can't import" errors
+    # are useless: https://github.com/microsoft/vscode-python/issues/9185
+    "import-error",
+]
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint.typecheck]
+ignored-modules = ["winreg"]
