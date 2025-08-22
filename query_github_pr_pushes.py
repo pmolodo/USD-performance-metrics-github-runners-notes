@@ -24,7 +24,10 @@ def query_github_pr_pushes(owner: str, project: str,
                            token: Optional[str] = None,
                            output_file: str = "pr_push_times.json"):
     """
-    Query GitHub API for all push timestamps in PRs for a repository.
+    Query GitHub API for PR creation and commit event timestamps.
+
+    Tracks when PRs are created and when new commits are added to PR branches
+    using the timeline API, not individual commit authoring times.
 
     Args:
         owner: Repository owner
@@ -106,52 +109,82 @@ def query_github_pr_pushes(owner: str, project: str,
         for pr in prs:
             pr_number = pr['number']
             pr_created_at = pr['created_at']
+            pr_closed_at = pr.get('closed_at')  # None if still open
 
-            # Filter by time if specified
+            # Filter PRs by lifetime overlap with requested time range
             if start_dt or end_dt:
-                pr_date = datetime.datetime.fromisoformat(
+                pr_created = datetime.datetime.fromisoformat(
                     pr_created_at.replace('Z', '+00:00'))
-                if start_dt and pr_date < start_dt:
+                pr_closed = None
+                if pr_closed_at:
+                    pr_closed = datetime.datetime.fromisoformat(
+                        pr_closed_at.replace('Z', '+00:00'))
+                else:
+                    # If PR is still open, use current time as end
+                    pr_closed = datetime.datetime.now(datetime.timezone.utc)
+
+                # Check if PR lifetime overlaps with time range
+                # Overlap: PR.created <= script.end AND
+                # PR.closed >= script.start
+                if start_dt and pr_closed < start_dt:
                     continue
-                if end_dt and pr_date > end_dt:
+                if end_dt and pr_created > end_dt:
                     continue
 
             print(f"  Processing PR #{pr_number}...")
 
-            # Get commits for this PR to find push times
-            commits_url = (f'{base_url}/repos/{owner}/{project}/pulls/'
-                           f'{pr_number}/commits')
-            commits_response = requests.get(commits_url, headers=headers,
-                                            timeout=30)
+            # Get PR branch information
+            pr_head_ref = pr['head']['ref']  # Branch name
+            pr_head_repo = pr['head']['repo']['full_name']
 
-            if commits_response.status_code == 429:
+            # Get timeline events for this PR to find commit events
+            timeline_url = (f'{base_url}/repos/{owner}/{project}/issues/'
+                            f'{pr_number}/timeline')
+            timeline_response = requests.get(timeline_url, headers=headers,
+                                             timeout=30)
+
+            if timeline_response.status_code == 429:
                 print(f"    Rate limit hit for PR #{pr_number}, "
-                      f"skipping commits but keeping PR")
+                      f"skipping commit events but keeping PR")
                 # Still save the PR with just creation time
                 pr_data = {
                     'pr_number': pr_number,
                     'pr_title': pr['title'],
                     'pr_created_at': pr_created_at,
                     'pr_state': pr['state'],
+                    'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
                     'timestamps': [pr_created_at],
                     'total_pushes': 1,
                     'note': 'Rate limited - only PR creation time included'
                 }
                 all_pr_data.append(pr_data)
                 continue
-            elif commits_response.status_code != 200:
-                print(f"    Warning: Could not fetch commits for PR "
-                      f"#{pr_number}: {commits_response.status_code}")
+            elif timeline_response.status_code != 200:
+                print(f"    Warning: Could not fetch timeline for PR "
+                      f"#{pr_number}: {timeline_response.status_code}")
                 continue
 
-            commits = commits_response.json()
+            timeline_events = timeline_response.json()
 
-            # Collect all timestamps (PR creation + commit times)
+            # Collect PR creation time + commit event times from timeline
             timestamps = [pr_created_at]  # Include PR creation time
 
-            for commit in commits:
-                commit_date = commit['commit']['author']['date']
-                timestamps.append(commit_date)
+            # Filter timeline events for commit events after PR creation
+            pr_created_time = datetime.datetime.fromisoformat(
+                pr_created_at.replace('Z', '+00:00'))
+
+            for event in timeline_events:
+                # Look for 'committed' events which indicate commits pushed
+                if event.get('event') == 'committed':
+                    # Get the commit timestamp
+                    commit_time = event.get('created_at')
+                    if commit_time:
+                        event_time = datetime.datetime.fromisoformat(
+                            commit_time.replace('Z', '+00:00'))
+
+                        # Only include commits after PR creation
+                        if event_time > pr_created_time:
+                            timestamps.append(commit_time)
 
             # Remove duplicates and sort
             unique_timestamps = sorted(list(set(timestamps)))
@@ -161,6 +194,7 @@ def query_github_pr_pushes(owner: str, project: str,
                 'pr_title': pr['title'],
                 'pr_created_at': pr_created_at,
                 'pr_state': pr['state'],
+                'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
                 'timestamps': unique_timestamps,
                 'total_pushes': len(unique_timestamps)
             }
