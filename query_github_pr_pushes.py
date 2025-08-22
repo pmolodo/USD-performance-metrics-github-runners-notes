@@ -210,7 +210,12 @@ def query_github_pr_pushes(owner: str, project: str,
         if len(prs) < per_page:
             break
 
+    # Calculate total timestamp events across all PRs
+    total_timestamp_events = sum(len(pr_data['timestamps'])
+                                 for pr_data in all_pr_data)
+
     print(f"\nFound {len(all_pr_data)} PRs with push data.")
+    print(f"Total timestamp events across all PRs: {total_timestamp_events}")
 
     # Save results to JSON file
     output_data = {
@@ -221,6 +226,7 @@ def query_github_pr_pushes(owner: str, project: str,
             'end_time': end_time
         },
         'total_prs': len(all_pr_data),
+        'total_timestamp_events': total_timestamp_events,
         'prs': all_pr_data
     }
 
