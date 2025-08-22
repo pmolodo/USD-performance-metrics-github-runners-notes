@@ -19,6 +19,33 @@ from tqdm import tqdm
 ###############################################################################
 
 
+def parse_datetime_string(dt_string: str,
+                          is_github_api_format: bool = False
+                          ) -> datetime.datetime:
+    """
+    Convert a datetime string to a timezone-aware datetime object.
+
+    Args:
+        dt_string: The datetime string to parse
+        is_github_api_format: If True, converts 'Z' suffix to '+00:00'
+                             If False, assumes user input and adds UTC timezone
+
+    Returns:
+        A timezone-aware datetime object
+    """
+    if is_github_api_format:
+        # GitHub API uses 'Z' suffix which needs to be converted to '+00:00'
+        dt_string = dt_string.replace('Z', '+00:00')
+
+    dt = datetime.datetime.fromisoformat(dt_string)
+
+    # Ensure timezone awareness - add UTC if no timezone specified
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+
+    return dt
+
+
 def get_total_pr_count(owner: str, project: str, headers: dict) -> int:
     """Get total number of PRs in the repository using search API."""
     try:
@@ -88,15 +115,9 @@ def query_github_pr_pushes(owner: str, project: str,
     start_dt = None
     end_dt = None
     if start_time:
-        start_dt = datetime.datetime.fromisoformat(start_time)
-        # Make start_time timezone-aware if it isn't already
-        if start_dt.tzinfo is None:
-            start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
+        start_dt = parse_datetime_string(start_time)
     if end_time:
-        end_dt = datetime.datetime.fromisoformat(end_time)
-        # Make end_time timezone-aware if it isn't already
-        if end_dt.tzinfo is None:
-            end_dt = end_dt.replace(tzinfo=datetime.timezone.utc)
+        end_dt = parse_datetime_string(end_time)
 
     # Get all pull requests (both open and closed)
     all_pr_data = []
@@ -149,12 +170,12 @@ def query_github_pr_pushes(owner: str, project: str,
 
             # Filter PRs by lifetime overlap with requested time range
             if start_dt or end_dt:
-                pr_created = datetime.datetime.fromisoformat(
-                    pr_created_at.replace('Z', '+00:00'))
+                pr_created = parse_datetime_string(
+                    pr_created_at, is_github_api_format=True)
                 pr_closed = None
                 if pr_closed_at:
-                    pr_closed = datetime.datetime.fromisoformat(
-                        pr_closed_at.replace('Z', '+00:00'))
+                    pr_closed = parse_datetime_string(
+                        pr_closed_at, is_github_api_format=True)
                 else:
                     # If PR is still open, use current time as end
                     pr_closed = datetime.datetime.now(datetime.timezone.utc)
@@ -218,8 +239,8 @@ def query_github_pr_pushes(owner: str, project: str,
             timestamps = [pr_created_at]  # Include PR creation time
 
             # Filter timeline events for commit events after PR creation
-            pr_created_time = datetime.datetime.fromisoformat(
-                pr_created_at.replace('Z', '+00:00'))
+            pr_created_time = parse_datetime_string(
+                pr_created_at, is_github_api_format=True)
 
             for event in timeline_events:
                 # Look for 'committed' events which indicate commits pushed
@@ -227,8 +248,8 @@ def query_github_pr_pushes(owner: str, project: str,
                     # Get the commit timestamp
                     commit_time = event.get('created_at')
                     if commit_time:
-                        event_time = datetime.datetime.fromisoformat(
-                            commit_time.replace('Z', '+00:00'))
+                        event_time = parse_datetime_string(
+                            commit_time, is_github_api_format=True)
 
                         # Only include commits after PR creation
                         if event_time > pr_created_time:
