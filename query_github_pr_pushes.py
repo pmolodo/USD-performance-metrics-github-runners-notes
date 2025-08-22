@@ -204,7 +204,8 @@ def query_github_pr_pushes(owner: str, project: str,
                            start_time: Optional[str] = None,
                            end_time: Optional[str] = None,
                            token: Optional[str] = None,
-                           output_file: str = "pr_push_times.json"):
+                           output_file: str = "pr_push_times.json",
+                           max_prs: Optional[int] = None):
     """
     Query GitHub API for PR creation and commit event timestamps.
 
@@ -221,6 +222,7 @@ def query_github_pr_pushes(owner: str, project: str,
         end_time: Optional end time filter (ISO format string)
         token: GitHub personal access token
         output_file: Output JSON file path
+        max_prs: Optional maximum number of PRs to process (for testing)
     """
     # GitHub API base URL
     base_url = 'https://api.github.com'
@@ -261,6 +263,11 @@ def query_github_pr_pushes(owner: str, project: str,
         return
 
     print(f"Found {len(filtered_prs)} PRs matching criteria")
+
+    # Apply max_prs limit if specified
+    if max_prs is not None and max_prs < len(filtered_prs):
+        print(f"Limiting to first {max_prs} PRs (--max-prs specified)")
+        filtered_prs = filtered_prs[:max_prs]
 
     # Initialize progress bar based on filtered results
     pbar = tqdm(total=len(filtered_prs), desc="Processing PRs", unit="PR")
@@ -428,6 +435,8 @@ def get_parser():
                              "(can also use GITHUB_TOKEN env var)")
     parser.add_argument("--output", default="pr_push_times.json",
                         help="Output JSON file path")
+    parser.add_argument("--max-prs", type=int,
+                        help="Maximum number of PRs to process (for testing)")
     return parser
 
 
@@ -443,7 +452,8 @@ def main(argv=None):
             start_time=args.start,
             end_time=args.end,
             token=args.token,
-            output_file=args.output
+            output_file=args.output,
+            max_prs=args.max_prs
         )
     except Exception:  # pylint: disable=broad-except
         traceback.print_exc()
