@@ -64,25 +64,140 @@ def is_timestamp_in_range(timestamp: datetime.datetime,
             (end_dt is None or timestamp <= end_dt))
 
 
-def get_total_pr_count(owner: str, project: str, headers: dict) -> int:
-    """Get total number of PRs in the repository using search API."""
-    try:
-        search_url = 'https://api.github.com/search/issues'
+def build_pr_search_query(owner: str, project: str,
+                          start_dt: Optional[datetime.datetime],
+                          end_dt: Optional[datetime.datetime],
+                          is_open: bool) -> str:
+    """
+    Build GitHub search query to find PRs by state and date range.
+
+    Args:
+        owner: Repository owner
+        project: Repository name
+        start_dt: Optional start datetime for filtering
+        end_dt: Optional end datetime for filtering
+        is_open: True for open PRs, False for closed PRs
+
+    Returns:
+        GitHub search query string
+    """
+    # Base query components
+    query_parts = [f'repo:{owner}/{project}', 'type:pr']
+
+    # Format dates once
+    start_date = start_dt.strftime('%Y-%m-%d') if start_dt else None
+    end_date = end_dt.strftime('%Y-%m-%d') if end_dt else None
+
+    # State-specific logic
+    if is_open:
+        query_parts.append('is:open')
+    else:  # closed PRs
+        if start_date:
+            query_parts.append(f'closed:>={start_date}')
+        else:
+            query_parts.append('is:closed')
+
+    # Common start date filtering (updated constraint)
+    if start_date:
+        query_parts.append(f'updated:>={start_date}')
+
+    # Common end date filtering
+    if end_date:
+        query_parts.append(f'created:<={end_date}')
+
+    return ' '.join(query_parts)
+
+
+def build_open_prs_query(owner: str, project: str,
+                         start_dt: Optional[datetime.datetime],
+                         end_dt: Optional[datetime.datetime]) -> str:
+    """Build GitHub search query to find open PRs."""
+    return build_pr_search_query(owner, project, start_dt, end_dt, True)
+
+
+def build_closed_prs_query(owner: str, project: str,
+                           start_dt: Optional[datetime.datetime],
+                           end_dt: Optional[datetime.datetime]) -> str:
+    """Build query to find closed PRs with activity after start_dt."""
+    return build_pr_search_query(owner, project, start_dt, end_dt, False)
+
+
+def search_prs_with_query(query: str, headers: dict) -> list:
+    """Execute a single search query and return all paginated results."""
+    search_url = 'https://api.github.com/search/issues'
+    all_prs = []
+    page = 1
+    per_page = 100
+
+    while True:
         params = {
-            'q': f'repo:{owner}/{project} type:pr',
-            'per_page': 1  # We only need the count
+            'q': query,
+            'page': page,
+            'per_page': per_page,
+            'sort': 'created',
+            'order': 'desc'
         }
+
         response = requests.get(search_url, headers=headers, params=params,
                                 timeout=30)
-        if response.status_code == 200:
-            return response.json().get('total_count', 0)
+        if response.status_code != 200:
+            print(f"Error in search API: {response.status_code} - "
+                  f"{response.text}")
+            break
+
+        data = response.json()
+        items = data.get('items', [])
+
+        if not items:
+            break
+
+        all_prs.extend(items)
+
+        # Check if we've got all results
+        if len(items) < per_page:
+            break
+
+        page += 1
+
+    return all_prs
+
+
+def search_filtered_prs(owner: str, project: str, headers: dict,
+                        start_dt: Optional[datetime.datetime],
+                        end_dt: Optional[datetime.datetime]):
+    """Use search API to get PRs filtered by date range.
+
+    Makes two separate queries (open PRs and closed PRs) since GitHub's
+    issue search API doesn't support OR operators with parentheses.
+    """
+    # Build separate queries for open and closed PRs
+    open_query = build_open_prs_query(owner, project, start_dt, end_dt)
+    closed_query = build_closed_prs_query(owner, project, start_dt, end_dt)
+
+    print(f"Open PRs query: {open_query}")
+    print(f"Closed PRs query: {closed_query}")
+
+    # Execute both queries
+    open_prs = search_prs_with_query(open_query, headers)
+    closed_prs = search_prs_with_query(closed_query, headers)
+
+    print(f"Found {len(open_prs)} open PRs and {len(closed_prs)} closed PRs")
+
+    # Combine results and remove duplicates (shouldn't be any, but be safe)
+    all_prs = open_prs + closed_prs
+    seen_pr_numbers = set()
+    unique_prs = []
+
+    for pr in all_prs:
+        pr_number = pr.get('number')
+        if pr_number not in seen_pr_numbers:
+            seen_pr_numbers.add(pr_number)
+            unique_prs.append(pr)
         else:
-            print(f"Warning: Could not get total PR count: "
-                  f"{response.status_code}")
-            return 0
-    except (requests.RequestException, KeyError, ValueError) as e:
-        print(f"Warning: Could not get total PR count: {e}")
-        return 0
+            print(f"Warning: Duplicate PR #{pr_number} found and removed")
+
+    print(f"Total unique PRs: {len(unique_prs)}")
+    return unique_prs
 
 
 def query_github_pr_pushes(owner: str, project: str,
@@ -128,10 +243,6 @@ def query_github_pr_pushes(owner: str, project: str,
 
     print(f"Fetching PRs for {owner}/{project}...")
 
-    # Get total PR count for progress bar
-    total_prs = get_total_pr_count(owner, project, headers)
-    if total_prs > 0:
-        print(f"Repository has {total_prs} total PRs")
     # Process time filters once outside the loop
     start_dt = None
     end_dt = None
@@ -140,178 +251,133 @@ def query_github_pr_pushes(owner: str, project: str,
     if end_time:
         end_dt = parse_datetime_string(end_time)
 
-    # Get all pull requests (both open and closed)
+    # Use search API to get filtered PRs
+    print("Using search API to get PRs within date range...")
+    filtered_prs = search_filtered_prs(owner, project, headers,
+                                       start_dt, end_dt)
+
+    if not filtered_prs:
+        print("No PRs found matching the search criteria.")
+        return
+
+    print(f"Found {len(filtered_prs)} PRs matching criteria")
+
+    # Initialize progress bar based on filtered results
+    pbar = tqdm(total=len(filtered_prs), desc="Processing PRs", unit="PR")
     all_pr_data = []
-    page = 1
-    per_page = 100
 
-    # Initialize progress bar
-    pbar = (tqdm(total=total_prs, desc="Processing PRs", unit="PR")
-            if total_prs > 0 else None)
+    for pr_item in filtered_prs:
+        pr_number = pr_item['number']
+        pr_created_at = pr_item['created_at']
+        pr_title = pr_item['title']
+        pr_state = pr_item['state']
 
-    while True:
-        url = f'{base_url}/repos/{owner}/{project}/pulls'
-        params = {
-            'state': 'all',
-            'page': page,
-            'per_page': per_page,
-            'sort': 'created',
-            'direction': 'desc'
-        }
+        # Update progress bar at start of loop for every PR
+        pbar.update(1)
 
-        response = requests.get(url, headers=headers, params=params,
-                                timeout=30)
-        if response.status_code == 429:
-            print(f"Hit rate limit on page {page}. Saving partial results...")
-            break
-        elif response.status_code != 200:
-            print(f"Error fetching PRs: {response.status_code} - "
-                  f"{response.text}")
-            if all_pr_data:
-                print("Saving partial results before exiting...")
-                break
-            if pbar:
-                pbar.close()
-            return
+        # Search API already filtered PRs by date, no filtering needed
 
-        prs = response.json()
-        if not prs:
-            break
+        # Get detailed PR information to access head/branch info
+        pr_details_url = (f'{base_url}/repos/{owner}/{project}/pulls/'
+                          f'{pr_number}')
+        pr_response = requests.get(pr_details_url, headers=headers,
+                                   timeout=30)
 
-        # Update progress bar description with current page info
-        if pbar:
-            pbar.set_description(f"Processing page {page}")
-        else:
-            print(f"Processing page {page} ({len(prs)} PRs)...")
+        if pr_response.status_code != 200:
+            print(f"Warning: Could not fetch PR details for #{pr_number}: "
+                  f"{pr_response.status_code}")
+            continue
 
-        for pr in prs:
-            pr_number = pr['number']
-            pr_created_at = pr['created_at']
-            pr_closed_at = pr.get('closed_at')  # None if still open
+        pr_details = pr_response.json()
 
-            # Update progress bar at start of loop for every PR
-            if pbar:
-                pbar.update(1)
+        # Get PR branch information
+        pr_head_ref = pr_details['head']['ref']  # Branch name
+        pr_head_repo = pr_details['head']['repo']['full_name']
 
-            # Filter PRs by lifetime overlap with requested time range
-            if start_dt or end_dt:
-                pr_created = parse_datetime_string(
-                    pr_created_at, is_github_api_format=True)
-                pr_closed = None
-                if pr_closed_at:
-                    pr_closed = parse_datetime_string(
-                        pr_closed_at, is_github_api_format=True)
-                else:
-                    # If PR is still open, use current time as end
-                    pr_closed = datetime.datetime.now(datetime.timezone.utc)
+        # Get timeline events for this PR to find commit events
+        timeline_url = (f'{base_url}/repos/{owner}/{project}/issues/'
+                        f'{pr_number}/timeline')
+        timeline_response = requests.get(timeline_url, headers=headers,
+                                         timeout=30)
 
-                # Check if PR lifetime overlaps with time range
-                # Overlap: PR.created <= script.end AND
-                # PR.closed >= script.start
-                if start_dt and pr_closed < start_dt:
-                    continue
-                if end_dt and pr_created > end_dt:
-                    continue
-
-            # Only print individual PR progress if no progress bar
-            if not pbar:
-                print(f"  Processing PR #{pr_number}...")
-
-            # Get PR branch information
-            pr_head_ref = pr['head']['ref']  # Branch name
-            pr_head_repo = pr['head']['repo']['full_name']
-
-            # Get timeline events for this PR to find commit events
-            timeline_url = (f'{base_url}/repos/{owner}/{project}/issues/'
-                            f'{pr_number}/timeline')
-            timeline_response = requests.get(timeline_url, headers=headers,
-                                             timeout=30)
-
-            if timeline_response.status_code == 429:
-                print(f"    Rate limit hit for PR #{pr_number}, "
-                      f"skipping commit events but keeping PR")
-                # Still save the PR with just creation time (if within range)
-                pr_created_time = parse_datetime_string(
-                    pr_created_at, is_github_api_format=True)
-
-                timestamps = []
-                if is_timestamp_in_range(pr_created_time, start_dt, end_dt):
-                    timestamps.append(pr_created_at)
-
-                pr_data = {
-                    'pr_number': pr_number,
-                    'pr_title': pr['title'],
-                    'pr_created_at': pr_created_at,
-                    'pr_state': pr['state'],
-                    'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
-                    'timestamps': timestamps,
-                    'total_pushes': len(timestamps),
-                    'note': 'Rate limited - only PR creation time included'
-                }
-                all_pr_data.append(pr_data)
-                continue
-            elif timeline_response.status_code != 200:
-                print(f"    Warning: Could not fetch timeline for PR "
-                      f"#{pr_number}: {timeline_response.status_code}")
-                continue
-
-            timeline_events = timeline_response.json()
-
-            # Collect PR creation time + commit event times from timeline
-            timestamps = []
-
-            # Filter timeline events for commit events after PR creation
+        if timeline_response.status_code == 429:
+            print(f"    Rate limit hit for PR #{pr_number}, "
+                  f"skipping commit events but keeping PR")
+            # Still save the PR with just creation time (if within range)
             pr_created_time = parse_datetime_string(
                 pr_created_at, is_github_api_format=True)
 
-            # Add PR creation time only if it's within our time range
+            timestamps = []
             if is_timestamp_in_range(pr_created_time, start_dt, end_dt):
                 timestamps.append(pr_created_at)
 
-            for event in timeline_events:
-                # Look for 'committed' events which indicate commits pushed
-                if event.get('event') == 'committed':
-                    # Get the commit timestamp
-                    commit_time = event.get('created_at')
-                    if commit_time:
-                        event_time = parse_datetime_string(
-                            commit_time, is_github_api_format=True)
-
-                        # Only include commits that are:
-                        # 1. After PR creation
-                        # 2. Within our specified time range
-                        if (event_time > pr_created_time and
-                                is_timestamp_in_range(event_time, start_dt,
-                                                      end_dt)):
-                            timestamps.append(commit_time)
-
-            # Remove duplicates and sort
-            unique_timestamps = sorted(list(set(timestamps)))
-
             pr_data = {
                 'pr_number': pr_number,
-                'pr_title': pr['title'],
+                'pr_title': pr_title,
                 'pr_created_at': pr_created_at,
-                'pr_state': pr['state'],
+                'pr_state': pr_state,
                 'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
-                'timestamps': unique_timestamps,
-                'total_pushes': len(unique_timestamps)
+                'timestamps': timestamps,
+                'total_pushes': len(timestamps),
+                'note': 'Rate limited - only PR creation time included'
             }
-
             all_pr_data.append(pr_data)
+            continue
+        elif timeline_response.status_code != 200:
+            print(f"    Warning: Could not fetch timeline for PR "
+                  f"#{pr_number}: {timeline_response.status_code}")
+            continue
 
-            # Rate limiting - be nice to GitHub API
-            time.sleep(0.5)
+        timeline_events = timeline_response.json()
 
-        page += 1
+        # Collect PR creation time + commit event times from timeline
+        timestamps = []
 
-        # If we got fewer than per_page results, we're done
-        if len(prs) < per_page:
-            break
+        # Filter timeline events for commit events after PR creation
+        pr_created_time = parse_datetime_string(
+            pr_created_at, is_github_api_format=True)
+
+        # Add PR creation time only if it's within our time range
+        if is_timestamp_in_range(pr_created_time, start_dt, end_dt):
+            timestamps.append(pr_created_at)
+
+        for event in timeline_events:
+            # Look for 'committed' events which indicate commits pushed
+            if event.get('event') == 'committed':
+                # Get the commit timestamp
+                commit_time = event.get('created_at')
+                if commit_time:
+                    event_time = parse_datetime_string(
+                        commit_time, is_github_api_format=True)
+
+                    # Only include commits that are:
+                    # 1. After PR creation
+                    # 2. Within our specified time range
+                    if (event_time > pr_created_time and
+                            is_timestamp_in_range(event_time, start_dt,
+                                                  end_dt)):
+                        timestamps.append(commit_time)
+
+        # Remove duplicates and sort
+        unique_timestamps = sorted(list(set(timestamps)))
+
+        pr_data = {
+            'pr_number': pr_number,
+            'pr_title': pr_title,
+            'pr_created_at': pr_created_at,
+            'pr_state': pr_state,
+            'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
+            'timestamps': unique_timestamps,
+            'total_pushes': len(unique_timestamps)
+        }
+
+        all_pr_data.append(pr_data)
+
+        # Rate limiting - be nice to GitHub API
+        time.sleep(0.5)
 
     # Close progress bar
-    if pbar:
-        pbar.close()
+    pbar.close()
 
     # Calculate total timestamp events across all PRs
     total_timestamp_events = sum(len(pr_data['timestamps'])
