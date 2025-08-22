@@ -55,6 +55,20 @@ def query_github_pr_pushes(owner: str, project: str,
 
     print(f"Fetching PRs for {owner}/{project}...")
 
+    # Process time filters once outside the loop
+    start_dt = None
+    end_dt = None
+    if start_time:
+        start_dt = datetime.datetime.fromisoformat(start_time)
+        # Make start_time timezone-aware if it isn't already
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
+    if end_time:
+        end_dt = datetime.datetime.fromisoformat(end_time)
+        # Make end_time timezone-aware if it isn't already
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=datetime.timezone.utc)
+
     # Get all pull requests (both open and closed)
     all_pr_data = []
     page = 1
@@ -94,24 +108,13 @@ def query_github_pr_pushes(owner: str, project: str,
             pr_created_at = pr['created_at']
 
             # Filter by time if specified
-            if start_time or end_time:
+            if start_dt or end_dt:
                 pr_date = datetime.datetime.fromisoformat(
                     pr_created_at.replace('Z', '+00:00'))
-                if start_time:
-                    start_dt = datetime.datetime.fromisoformat(start_time)
-                    # Make start_time timezone-aware if it isn't already
-                    if start_dt.tzinfo is None:
-                        start_dt = start_dt.replace(
-                            tzinfo=datetime.timezone.utc)
-                    if pr_date < start_dt:
-                        continue
-                if end_time:
-                    end_dt = datetime.datetime.fromisoformat(end_time)
-                    # Make end_time timezone-aware if it isn't already
-                    if end_dt.tzinfo is None:
-                        end_dt = end_dt.replace(tzinfo=datetime.timezone.utc)
-                    if pr_date > end_dt:
-                        continue
+                if start_dt and pr_date < start_dt:
+                    continue
+                if end_dt and pr_date > end_dt:
+                    continue
 
             print(f"  Processing PR #{pr_number}...")
 
