@@ -168,6 +168,10 @@ def query_github_pr_pushes(owner: str, project: str,
             pr_created_at = pr['created_at']
             pr_closed_at = pr.get('closed_at')  # None if still open
 
+            # Update progress bar at start of loop for every PR
+            if pbar:
+                pbar.update(1)
+
             # Filter PRs by lifetime overlap with requested time range
             if start_dt or end_dt:
                 pr_created = parse_datetime_string(
@@ -184,12 +188,8 @@ def query_github_pr_pushes(owner: str, project: str,
                 # Overlap: PR.created <= script.end AND
                 # PR.closed >= script.start
                 if start_dt and pr_closed < start_dt:
-                    if pbar:
-                        pbar.update(1)
                     continue
                 if end_dt and pr_created > end_dt:
-                    if pbar:
-                        pbar.update(1)
                     continue
 
             # Only print individual PR progress if no progress bar
@@ -221,16 +221,10 @@ def query_github_pr_pushes(owner: str, project: str,
                     'note': 'Rate limited - only PR creation time included'
                 }
                 all_pr_data.append(pr_data)
-                # Update progress bar
-                if pbar:
-                    pbar.update(1)
                 continue
             elif timeline_response.status_code != 200:
                 print(f"    Warning: Could not fetch timeline for PR "
                       f"#{pr_number}: {timeline_response.status_code}")
-                # Update progress bar even for failed PRs
-                if pbar:
-                    pbar.update(1)
                 continue
 
             timeline_events = timeline_response.json()
@@ -269,10 +263,6 @@ def query_github_pr_pushes(owner: str, project: str,
             }
 
             all_pr_data.append(pr_data)
-
-            # Update progress bar
-            if pbar:
-                pbar.update(1)
 
             # Rate limiting - be nice to GitHub API
             time.sleep(0.5)
