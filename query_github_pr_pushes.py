@@ -12,10 +12,32 @@ import sys
 import traceback
 import time
 from typing import Optional
+from tqdm import tqdm
 
 ###############################################################################
 # Core functions
 ###############################################################################
+
+
+def get_total_pr_count(owner: str, project: str, headers: dict) -> int:
+    """Get total number of PRs in the repository using search API."""
+    try:
+        search_url = 'https://api.github.com/search/issues'
+        params = {
+            'q': f'repo:{owner}/{project} type:pr',
+            'per_page': 1  # We only need the count
+        }
+        response = requests.get(search_url, headers=headers, params=params,
+                                timeout=30)
+        if response.status_code == 200:
+            return response.json().get('total_count', 0)
+        else:
+            print(f"Warning: Could not get total PR count: "
+                  f"{response.status_code}")
+            return 0
+    except (requests.RequestException, KeyError, ValueError) as e:
+        print(f"Warning: Could not get total PR count: {e}")
+        return 0
 
 
 def query_github_pr_pushes(owner: str, project: str,
@@ -58,6 +80,10 @@ def query_github_pr_pushes(owner: str, project: str,
 
     print(f"Fetching PRs for {owner}/{project}...")
 
+    # Get total PR count for progress bar
+    total_prs = get_total_pr_count(owner, project, headers)
+    if total_prs > 0:
+        print(f"Repository has {total_prs} total PRs")
     # Process time filters once outside the loop
     start_dt = None
     end_dt = None
@@ -76,6 +102,10 @@ def query_github_pr_pushes(owner: str, project: str,
     all_pr_data = []
     page = 1
     per_page = 100
+
+    # Initialize progress bar
+    pbar = (tqdm(total=total_prs, desc="Processing PRs", unit="PR")
+            if total_prs > 0 else None)
 
     while True:
         url = f'{base_url}/repos/{owner}/{project}/pulls'
@@ -98,13 +128,19 @@ def query_github_pr_pushes(owner: str, project: str,
             if all_pr_data:
                 print("Saving partial results before exiting...")
                 break
+            if pbar:
+                pbar.close()
             return
 
         prs = response.json()
         if not prs:
             break
 
-        print(f"Processing page {page} ({len(prs)} PRs)...")
+        # Update progress bar description with current page info
+        if pbar:
+            pbar.set_description(f"Processing page {page}")
+        else:
+            print(f"Processing page {page} ({len(prs)} PRs)...")
 
         for pr in prs:
             pr_number = pr['number']
@@ -127,11 +163,17 @@ def query_github_pr_pushes(owner: str, project: str,
                 # Overlap: PR.created <= script.end AND
                 # PR.closed >= script.start
                 if start_dt and pr_closed < start_dt:
+                    if pbar:
+                        pbar.update(1)
                     continue
                 if end_dt and pr_created > end_dt:
+                    if pbar:
+                        pbar.update(1)
                     continue
 
-            print(f"  Processing PR #{pr_number}...")
+            # Only print individual PR progress if no progress bar
+            if not pbar:
+                print(f"  Processing PR #{pr_number}...")
 
             # Get PR branch information
             pr_head_ref = pr['head']['ref']  # Branch name
@@ -158,10 +200,16 @@ def query_github_pr_pushes(owner: str, project: str,
                     'note': 'Rate limited - only PR creation time included'
                 }
                 all_pr_data.append(pr_data)
+                # Update progress bar
+                if pbar:
+                    pbar.update(1)
                 continue
             elif timeline_response.status_code != 200:
                 print(f"    Warning: Could not fetch timeline for PR "
                       f"#{pr_number}: {timeline_response.status_code}")
+                # Update progress bar even for failed PRs
+                if pbar:
+                    pbar.update(1)
                 continue
 
             timeline_events = timeline_response.json()
@@ -201,6 +249,10 @@ def query_github_pr_pushes(owner: str, project: str,
 
             all_pr_data.append(pr_data)
 
+            # Update progress bar
+            if pbar:
+                pbar.update(1)
+
             # Rate limiting - be nice to GitHub API
             time.sleep(0.5)
 
@@ -209,6 +261,10 @@ def query_github_pr_pushes(owner: str, project: str,
         # If we got fewer than per_page results, we're done
         if len(prs) < per_page:
             break
+
+    # Close progress bar
+    if pbar:
+        pbar.close()
 
     # Calculate total timestamp events across all PRs
     total_timestamp_events = sum(len(pr_data['timestamps'])
