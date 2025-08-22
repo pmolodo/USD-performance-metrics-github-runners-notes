@@ -11,6 +11,7 @@ import requests
 import sys
 import traceback
 import time
+from collections import deque
 from typing import Optional
 from tqdm import tqdm
 
@@ -62,6 +63,91 @@ def is_timestamp_in_range(timestamp: datetime.datetime,
     """
     return ((start_dt is None or timestamp >= start_dt) and
             (end_dt is None or timestamp <= end_dt))
+
+
+class PRTask:
+    """Represents a PR processing task with retry information."""
+
+    def __init__(self, pr_item: dict, max_retries: int = 3):
+        self.pr_item = pr_item
+        self.pr_number = pr_item.get('number')
+        self.retries_remaining = max_retries
+        self.error_message: Optional[str] = None
+        self.processed_data: Optional[dict] = None
+
+    def __repr__(self):
+        return (f"PRTask(PR #{self.pr_number}, "
+                f"retries={self.retries_remaining})")
+
+
+def process_single_pr(task: PRTask, headers: dict,
+                      owner: str, project: str,
+                      start_dt: Optional[datetime.datetime],
+                      end_dt: Optional[datetime.datetime]) -> bool:
+    """Process a single PR to extract timeline data.
+
+    Args:
+        task: The PR task to process
+        headers: HTTP headers for API requests
+        owner: Repository owner
+        project: Repository name
+        start_dt: Optional start datetime filter
+        end_dt: Optional end datetime filter
+
+    Returns:
+        True if processing succeeded, False if it failed
+    """
+    pr_item = task.pr_item
+    pr_number = pr_item.get('number')
+
+    try:
+        # Get PR creation time (always included)
+        pr_created_str = pr_item.get('created_at')
+        if not pr_created_str:
+            task.error_message = "No creation timestamp found"
+            return False
+
+        pr_created = parse_datetime_string(pr_created_str, True)
+
+        # Start with PR creation timestamp
+        timestamps = []
+        if is_timestamp_in_range(pr_created, start_dt, end_dt):
+            timestamps.append(pr_created.isoformat())
+
+        # Get timeline events
+        timeline_url = (f'https://api.github.com/repos/'
+                        f'{owner}/{project}/'
+                        f'issues/{pr_number}/timeline')
+
+        response = requests.get(timeline_url, headers=headers, timeout=30)
+        if response.status_code != 200:
+            task.error_message = (f"Timeline API returned "
+                                  f"{response.status_code}: {response.text}")
+            return False
+
+        timeline_events = response.json()
+
+        # Process timeline events for commit-related activity
+        for event in timeline_events:
+            if event.get('event') in ['committed', 'pushed']:
+                event_time_str = event.get('created_at')
+                if event_time_str:
+                    event_time = parse_datetime_string(event_time_str, True)
+                    if is_timestamp_in_range(event_time, start_dt, end_dt):
+                        timestamps.append(event_time.isoformat())
+
+        # Store the processed data
+        task.processed_data = {
+            'pr_number': pr_number,
+            'title': pr_item.get('title', ''),
+            'timestamps': timestamps
+        }
+
+        return True
+
+    except requests.RequestException as e:
+        task.error_message = f"Request failed: {e}"
+        return False
 
 
 def build_pr_search_query(owner: str, project: str,
@@ -224,9 +310,6 @@ def query_github_pr_pushes(owner: str, project: str,
         output_file: Output JSON file path
         max_prs: Optional maximum number of PRs to process (for testing)
     """
-    # GitHub API base URL
-    base_url = 'https://api.github.com'
-
     # Setup headers
     headers = {
         'Accept': 'application/vnd.github.v3+json',
@@ -269,122 +352,96 @@ def query_github_pr_pushes(owner: str, project: str,
         print(f"Limiting to first {max_prs} PRs (--max-prs specified)")
         filtered_prs = filtered_prs[:max_prs]
 
-    # Initialize progress bar based on filtered results
-    pbar = tqdm(total=len(filtered_prs), desc="Processing PRs", unit="PR")
-    all_pr_data = []
+    # Initialize deque-based retry system for PR processing
+    print(f"Setting up retry system for {len(filtered_prs)} PRs...")
+
+    # Create PR tasks and add to processing queue
+    active_pr_tasks = deque()
+    successful_prs = []
+    failed_prs = []
 
     for pr_item in filtered_prs:
-        pr_number = pr_item['number']
-        pr_created_at = pr_item['created_at']
-        pr_title = pr_item['title']
-        pr_state = pr_item['state']
+        task = PRTask(pr_item)
+        active_pr_tasks.append(task)
 
-        # Update progress bar at start of loop for every PR
-        pbar.update(1)
+    # Initialize progress tracking
+    total_prs = len(filtered_prs)
+    pbar = tqdm(total=total_prs, desc="Processing PRs", unit="PR")
+    processed_count = 0
 
-        # Search API already filtered PRs by date, no filtering needed
+    # Main processing loop with retry logic
+    while active_pr_tasks:
+        task = active_pr_tasks.popleft()
 
-        # Get detailed PR information to access head/branch info
-        pr_details_url = (f'{base_url}/repos/{owner}/{project}/pulls/'
-                          f'{pr_number}')
-        pr_response = requests.get(pr_details_url, headers=headers,
-                                   timeout=30)
+        success = process_single_pr(task, headers, owner, project,
+                                    start_dt, end_dt)
 
-        if pr_response.status_code != 200:
-            print(f"Warning: Could not fetch PR details for #{pr_number}: "
-                  f"{pr_response.status_code}")
-            continue
+        if success:
+            # Success - add to successful list and update progress
+            successful_prs.append(task)
+            processed_count += 1
+            pbar.update(1)
+            pbar.set_postfix({
+                'success': len(successful_prs),
+                'failed': len(failed_prs),
+                'retrying': len(active_pr_tasks)
+            })
 
-        pr_details = pr_response.json()
+        else:
+            # Failed - check if we should retry
+            task.retries_remaining -= 1
+            if task.retries_remaining > 0:
+                # Add back to queue for retry
+                active_pr_tasks.append(task)
+                pbar.set_description(
+                    f"Processing PRs (PR #{task.pr_number} retrying)"
+                )
+            else:
+                # Max retries exceeded - mark as failed
+                failed_prs.append(task)
+                processed_count += 1
+                pbar.update(1)
+                pbar.set_postfix({
+                    'success': len(successful_prs),
+                    'failed': len(failed_prs),
+                    'retrying': len(active_pr_tasks)
+                })
+                print(f"\n  ❌ PR #{task.pr_number} failed permanently: "
+                      f"{task.error_message}")
 
-        # Get PR branch information
-        pr_head_ref = pr_details['head']['ref']  # Branch name
-        pr_head_repo = pr_details['head']['repo']['full_name']
-
-        # Get timeline events for this PR to find commit events
-        timeline_url = (f'{base_url}/repos/{owner}/{project}/issues/'
-                        f'{pr_number}/timeline')
-        timeline_response = requests.get(timeline_url, headers=headers,
-                                         timeout=30)
-
-        if timeline_response.status_code == 429:
-            print(f"    Rate limit hit for PR #{pr_number}, "
-                  f"skipping commit events but keeping PR")
-            # Still save the PR with just creation time (if within range)
-            pr_created_time = parse_datetime_string(
-                pr_created_at, is_github_api_format=True)
-
-            timestamps = []
-            if is_timestamp_in_range(pr_created_time, start_dt, end_dt):
-                timestamps.append(pr_created_at)
-
-            pr_data = {
-                'pr_number': pr_number,
-                'pr_title': pr_title,
-                'pr_created_at': pr_created_at,
-                'pr_state': pr_state,
-                'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
-                'timestamps': timestamps,
-                'total_pushes': len(timestamps),
-                'note': 'Rate limited - only PR creation time included'
-            }
-            all_pr_data.append(pr_data)
-            continue
-        elif timeline_response.status_code != 200:
-            print(f"    Warning: Could not fetch timeline for PR "
-                  f"#{pr_number}: {timeline_response.status_code}")
-            continue
-
-        timeline_events = timeline_response.json()
-
-        # Collect PR creation time + commit event times from timeline
-        timestamps = []
-
-        # Filter timeline events for commit events after PR creation
-        pr_created_time = parse_datetime_string(
-            pr_created_at, is_github_api_format=True)
-
-        # Add PR creation time only if it's within our time range
-        if is_timestamp_in_range(pr_created_time, start_dt, end_dt):
-            timestamps.append(pr_created_at)
-
-        for event in timeline_events:
-            # Look for 'committed' events which indicate commits pushed
-            if event.get('event') == 'committed':
-                # Get the commit timestamp
-                commit_time = event.get('created_at')
-                if commit_time:
-                    event_time = parse_datetime_string(
-                        commit_time, is_github_api_format=True)
-
-                    # Only include commits that are:
-                    # 1. After PR creation
-                    # 2. Within our specified time range
-                    if (event_time > pr_created_time and
-                            is_timestamp_in_range(event_time, start_dt,
-                                                  end_dt)):
-                        timestamps.append(commit_time)
-
-        # Remove duplicates and sort
-        unique_timestamps = sorted(list(set(timestamps)))
-
-        pr_data = {
-            'pr_number': pr_number,
-            'pr_title': pr_title,
-            'pr_created_at': pr_created_at,
-            'pr_state': pr_state,
-            'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
-            'timestamps': unique_timestamps,
-            'total_pushes': len(unique_timestamps)
-        }
-
-        all_pr_data.append(pr_data)
-
-        # Rate limiting - be nice to GitHub API
-        time.sleep(0.5)
+        # Small delay between requests to be nice to the API
+        if active_pr_tasks or success:  # Only delay if more work to do
+            time.sleep(0.5)
 
     # Close progress bar
     pbar.close()
+
+    # Collect results from successful PR processing
+    all_pr_data = []
+    for task in successful_prs:
+        if task.processed_data:
+            all_pr_data.append(task.processed_data)
+
+    print("\nPR Processing Summary:")
+    print(f"  ✅ Successfully processed: {len(successful_prs)}")
+    print(f"  ❌ Failed to process: {len(failed_prs)}")
+
+    if failed_prs:
+        print("\nFailed PRs:")
+        for task in failed_prs:
+            print(f"  - PR #{task.pr_number}: {task.error_message}")
+
+    # Prepare processing statistics
+    processing_stats = {
+        'total_prs_found': len(filtered_prs),
+        'successfully_processed': len(successful_prs),
+        'failed_to_process': len(failed_prs),
+        'failed_pr_details': [{
+            'pr_number': task.pr_number,
+            'error': task.error_message,
+            'retries_attempted': 3 - task.retries_remaining
+        } for task in failed_prs]
+    }
 
     # Calculate total timestamp events across all PRs
     total_timestamp_events = sum(len(pr_data['timestamps'])
@@ -401,7 +458,8 @@ def query_github_pr_pushes(owner: str, project: str,
             'start_time': start_time,
             'end_time': end_time
         },
-        'total_prs': len(all_pr_data),
+        'processing_statistics': processing_stats,
+        'total_prs_processed': len(all_pr_data),
         'total_timestamp_events': total_timestamp_events,
         'prs': all_pr_data
     }
