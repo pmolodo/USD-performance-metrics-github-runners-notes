@@ -46,6 +46,24 @@ def parse_datetime_string(dt_string: str,
     return dt
 
 
+def is_timestamp_in_range(timestamp: datetime.datetime,
+                          start_dt: Optional[datetime.datetime],
+                          end_dt: Optional[datetime.datetime]) -> bool:
+    """
+    Check if a timestamp falls within the specified time range.
+
+    Args:
+        timestamp: The datetime to check
+        start_dt: Optional start datetime (None means no start limit)
+        end_dt: Optional end datetime (None means no end limit)
+
+    Returns:
+        True if timestamp is within range, False otherwise
+    """
+    return ((start_dt is None or timestamp >= start_dt) and
+            (end_dt is None or timestamp <= end_dt))
+
+
 def get_total_pr_count(owner: str, project: str, headers: dict) -> int:
     """Get total number of PRs in the repository using search API."""
     try:
@@ -77,6 +95,9 @@ def query_github_pr_pushes(owner: str, project: str,
 
     Tracks when PRs are created and when new commits are added to PR branches
     using the timeline API, not individual commit authoring times.
+
+    Filters PRs by lifetime overlap with time range, and filters all collected
+    timestamps to only include those within the specified time range.
 
     Args:
         owner: Repository owner
@@ -209,15 +230,22 @@ def query_github_pr_pushes(owner: str, project: str,
             if timeline_response.status_code == 429:
                 print(f"    Rate limit hit for PR #{pr_number}, "
                       f"skipping commit events but keeping PR")
-                # Still save the PR with just creation time
+                # Still save the PR with just creation time (if within range)
+                pr_created_time = parse_datetime_string(
+                    pr_created_at, is_github_api_format=True)
+
+                timestamps = []
+                if is_timestamp_in_range(pr_created_time, start_dt, end_dt):
+                    timestamps.append(pr_created_at)
+
                 pr_data = {
                     'pr_number': pr_number,
                     'pr_title': pr['title'],
                     'pr_created_at': pr_created_at,
                     'pr_state': pr['state'],
                     'pr_branch': f"{pr_head_repo}:{pr_head_ref}",
-                    'timestamps': [pr_created_at],
-                    'total_pushes': 1,
+                    'timestamps': timestamps,
+                    'total_pushes': len(timestamps),
                     'note': 'Rate limited - only PR creation time included'
                 }
                 all_pr_data.append(pr_data)
@@ -230,11 +258,15 @@ def query_github_pr_pushes(owner: str, project: str,
             timeline_events = timeline_response.json()
 
             # Collect PR creation time + commit event times from timeline
-            timestamps = [pr_created_at]  # Include PR creation time
+            timestamps = []
 
             # Filter timeline events for commit events after PR creation
             pr_created_time = parse_datetime_string(
                 pr_created_at, is_github_api_format=True)
+
+            # Add PR creation time only if it's within our time range
+            if is_timestamp_in_range(pr_created_time, start_dt, end_dt):
+                timestamps.append(pr_created_at)
 
             for event in timeline_events:
                 # Look for 'committed' events which indicate commits pushed
@@ -245,8 +277,12 @@ def query_github_pr_pushes(owner: str, project: str,
                         event_time = parse_datetime_string(
                             commit_time, is_github_api_format=True)
 
-                        # Only include commits after PR creation
-                        if event_time > pr_created_time:
+                        # Only include commits that are:
+                        # 1. After PR creation
+                        # 2. Within our specified time range
+                        if (event_time > pr_created_time and
+                                is_timestamp_in_range(event_time, start_dt,
+                                                      end_dt)):
                             timestamps.append(commit_time)
 
             # Remove duplicates and sort
