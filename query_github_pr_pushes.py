@@ -15,6 +15,9 @@ from collections import deque
 from typing import Optional
 from tqdm import tqdm
 
+# Constants
+DEFAULT_PER_PAGE = 100
+
 ###############################################################################
 # Core functions
 ###############################################################################
@@ -209,18 +212,32 @@ def build_closed_prs_query(owner: str, project: str,
 
 
 def search_prs_with_query(query: str, headers: dict,
-                          query_type: str = "PRs") -> list:
+                          query_type: str = "PRs",
+                          max_results: Optional[int] = None) -> list:
     """Execute a single search query and return all paginated results."""
+    # Validate max_results is an int >= 0. If 0, exit immediately.
+    if max_results is not None:
+        if not isinstance(max_results, int) or max_results < 0:
+            raise ValueError("max_results must be an integer >= 0")
+        if max_results == 0:
+            return []
+
     search_url = 'https://api.github.com/search/issues'
     all_prs = []
     page = 1
-    per_page = 100
 
     # Initialize progress bar for search pagination
     pbar = tqdm(desc=f"Searching {query_type}", unit="PR")
     total_count = None
 
     while True:
+        # Calculate per_page and remaining_results only if max_results is set
+        if max_results is None:
+            per_page = DEFAULT_PER_PAGE
+        else:
+            remaining_results = max_results - len(all_prs)
+            per_page = min(remaining_results, DEFAULT_PER_PAGE)
+
         params = {
             'q': query,
             'page': page,
@@ -242,6 +259,8 @@ def search_prs_with_query(query: str, headers: dict,
         # Get total count from first response to configure progress bar
         if total_count is None:
             total_count = data.get('total_count', 0)
+            if max_results is not None:
+                total_count = min(total_count, max_results)
             pbar.total = total_count
             pbar.set_description(f"Searching {query_type} (0/{total_count})")
 
@@ -249,10 +268,16 @@ def search_prs_with_query(query: str, headers: dict,
             break
 
         all_prs.extend(items)
+
         # Update progress bar to show actual PR progress
         pbar.n = len(all_prs)
-        pbar.set_description(f"Searching {query_type} ({len(all_prs)}/{total_count})")
+        desc = f"Searching {query_type} ({len(all_prs)}/{total_count})"
+        pbar.set_description(desc)
         pbar.refresh()
+
+        if max_results is not None and len(all_prs) >= max_results:
+            all_prs = all_prs[:max_results]
+            break
 
         # Check if we've got all results
         if len(items) < per_page:
@@ -270,7 +295,8 @@ def search_prs_with_query(query: str, headers: dict,
 
 def search_filtered_prs(owner: str, project: str, headers: dict,
                         start_dt: Optional[datetime.datetime],
-                        end_dt: Optional[datetime.datetime]):
+                        end_dt: Optional[datetime.datetime],
+                        max_prs: Optional[int] = None):
     """Use search API to get PRs filtered by date range.
 
     Makes two separate queries (open PRs and closed PRs) since GitHub's
@@ -283,9 +309,23 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
     print(f"Open PRs query: {open_query}")
     print(f"Closed PRs query: {closed_query}")
 
-    # Execute both queries
-    open_prs = search_prs_with_query(open_query, headers, "open PRs")
-    closed_prs = search_prs_with_query(closed_query, headers, "closed PRs")
+    # If max_prs is specified, we need to split between queries intelligently
+    # We'll start with open PRs, then get closed PRs up to remaining limit
+    remaining_limit = max_prs
+
+    # Execute open PRs query first
+    open_prs = search_prs_with_query(open_query, headers, "open PRs",
+                                     max_results=remaining_limit)
+
+    # Update remaining limit for closed PRs
+    if remaining_limit is not None:
+        remaining_limit -= len(open_prs)
+
+    # Execute closed PRs query with remaining limit
+    closed_prs = []
+    if remaining_limit is None or remaining_limit > 0:
+        closed_prs = search_prs_with_query(closed_query, headers, "closed PRs",
+                                           max_results=remaining_limit)
 
     print(f"Found {len(open_prs)} open PRs and {len(closed_prs)} closed PRs")
 
@@ -359,18 +399,13 @@ def query_github_pr_pushes(owner: str, project: str,
     # Use search API to get filtered PRs
     print("Using search API to get PRs within date range...")
     filtered_prs = search_filtered_prs(owner, project, headers,
-                                       start_dt, end_dt)
+                                       start_dt, end_dt, max_prs)
 
     if not filtered_prs:
         print("No PRs found matching the search criteria.")
         return
 
     print(f"Found {len(filtered_prs)} PRs matching criteria")
-
-    # Apply max_prs limit if specified
-    if max_prs is not None and max_prs < len(filtered_prs):
-        print(f"Limiting to first {max_prs} PRs (--max-prs specified)")
-        filtered_prs = filtered_prs[:max_prs]
 
     # Initialize deque-based retry system for PR processing
     print(f"Setting up retry system for {len(filtered_prs)} PRs...")
