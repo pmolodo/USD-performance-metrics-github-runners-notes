@@ -7,16 +7,117 @@ import argparse
 import datetime
 import json
 import os
+from re import S
 import requests
 import sys
 import traceback
 import time
 from collections import deque
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Union
 from tqdm import tqdm
 
 # Constants
 DEFAULT_PER_PAGE = 100
+BASE_DELAY = 0.5  # seconds
+MAX_EXPONENTIAL_DELAY = 300  # seconds
+
+###############################################################################
+# Data structures
+###############################################################################
+
+
+@dataclass
+class ProcessedPr:
+    """Result of successfully processing a PR."""
+    pr_number: int
+    title: str
+    timestamps: list
+
+
+@dataclass
+class FailedPr:
+    """Result of failed PR processing."""
+    pr_number: int
+    error_message: str
+    rate_limit_reset_time: Optional[datetime.datetime] = None
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """True if this failure was due to rate limiting."""
+        return self.rate_limit_reset_time is not None
+
+    @classmethod
+    def from_response(cls, pr_number: int, response) -> 'FailedPr':
+        """
+        Create a FailedPr from any non-200 HTTP response.
+
+        Args:
+            pr_number: PR number for the FailedPr object
+            response: HTTP response object with headers, status_code, text
+
+        Returns:
+            FailedPr object with appropriate error handling
+        """
+        # Handle rate limiting (403/429) with special reset time parsing
+        if response.status_code in [403, 429]:
+            # Try x-ratelimit-reset first (primary rate limits)
+            reset_ts = _get_header_int(response.headers, 'x-ratelimit-reset')
+            if reset_ts is not None:
+                reset_time = datetime.datetime.fromtimestamp(
+                    reset_ts, tz=datetime.timezone.utc
+                )
+                error_message = (
+                    f"Rate limited (reset at {reset_time.isoformat()}): "
+                    f"{response.status_code} - {response.text}"
+                )
+                return cls(
+                    pr_number=pr_number,
+                    error_message=error_message,
+                    rate_limit_reset_time=reset_time
+                )
+
+            # Try retry-after (secondary rate limits)
+            retry_seconds = _get_header_int(response.headers, 'retry-after')
+            if retry_seconds is not None:
+                current_time = datetime.datetime.now(datetime.timezone.utc)
+                delta = datetime.timedelta(seconds=retry_seconds)
+                reset_time = current_time + delta
+                error_message = (
+                    f"Rate limited (retry after {retry_seconds}s, "
+                    f"until {reset_time.isoformat()}): "
+                    f"{response.status_code} - {response.text}"
+                )
+                return cls(
+                    pr_number=pr_number,
+                    error_message=error_message,
+                    rate_limit_reset_time=reset_time
+                )
+
+        # Generic HTTP error (including 403/429 without rate limit headers)
+        error_message = (
+            f"HTTP error {response.status_code}: {response.text}"
+        )
+        return cls(
+            pr_number=pr_number,
+            error_message=error_message
+        )
+
+
+@dataclass
+class PRTask:
+    """Represents a PR processing task with retry information."""
+    pr_item: dict
+    retries_remaining: int = 3
+
+    @property
+    def pr_number(self) -> int:
+        """Get PR number from pr_item, raising RuntimeError if missing."""
+        number = self.pr_item.get('number')
+        if number is None:
+            raise RuntimeError("PR item is missing 'number' field")
+        return number
+
 
 ###############################################################################
 # Core functions
@@ -68,29 +169,39 @@ def is_timestamp_in_range(timestamp: datetime.datetime,
             (end_dt is None or timestamp <= end_dt))
 
 
-class PRTask:
-    """Represents a PR processing task with retry information."""
+def _get_header_int(headers, header_name: str) -> Optional[int]:
+    """
+    Safely get a header value and cast to int.
 
-    def __init__(self, pr_item: dict, max_retries: int = 3):
-        self.pr_item = pr_item
-        self.pr_number = pr_item.get('number')
-        self.retries_remaining = max_retries
-        self.error_message: Optional[str] = None
-        self.processed_data: Optional[dict] = None
+    Args:
+        headers: HTTP response headers
+        header_name: Name of the header to get
 
-    def __repr__(self):
-        return (f"PRTask(PR #{self.pr_number}, "
-                f"retries={self.retries_remaining})")
+    Returns:
+        Integer value if present and valid, None otherwise
+    """
+    header_value = headers.get(header_name)
+    if header_value is None:
+        return None
+
+    try:
+        return int(header_value)
+    except (ValueError, TypeError) as e:
+        print(f"Warning: Invalid {header_name} header: "
+              f"{header_value!r} ({e})")
+        return None
 
 
-def process_single_pr(task: PRTask, headers: dict,
-                      owner: str, project: str,
-                      start_dt: Optional[datetime.datetime],
-                      end_dt: Optional[datetime.datetime]) -> bool:
+def process_single_pr(
+        task: PRTask, headers: dict,
+        owner: str, project: str,
+        start_dt: Optional[datetime.datetime],
+        end_dt: Optional[datetime.datetime]
+) -> Union[ProcessedPr, FailedPr]:
     """Process a single PR to extract timeline data.
 
     Args:
-        task: The PR task to process
+        task: The PR task containing data to process
         headers: HTTP headers for API requests
         owner: Repository owner
         project: Repository name
@@ -98,17 +209,19 @@ def process_single_pr(task: PRTask, headers: dict,
         end_dt: Optional end datetime filter
 
     Returns:
-        True if processing succeeded, False if it failed
+        ProcessedPr on success, FailedPr on failure
     """
     pr_item = task.pr_item
-    pr_number = pr_item.get('number')
+    pr_number = task.pr_number
 
     try:
         # Get PR creation time (always included)
         pr_created_str = pr_item.get('created_at')
         if not pr_created_str:
-            task.error_message = "No creation timestamp found"
-            return False
+            return FailedPr(
+                pr_number=pr_number,
+                error_message="No creation timestamp found"
+            )
 
         pr_created = parse_datetime_string(pr_created_str, True)
 
@@ -123,10 +236,10 @@ def process_single_pr(task: PRTask, headers: dict,
                         f'issues/{pr_number}/timeline')
 
         response = requests.get(timeline_url, headers=headers, timeout=30)
+
+        # Handle any non-200 response (including rate limiting)
         if response.status_code != 200:
-            task.error_message = (f"Timeline API returned "
-                                  f"{response.status_code}: {response.text}")
-            return False
+            return FailedPr.from_response(pr_number, response)
 
         timeline_events = response.json()
 
@@ -139,18 +252,18 @@ def process_single_pr(task: PRTask, headers: dict,
                     if is_timestamp_in_range(event_time, start_dt, end_dt):
                         timestamps.append(event_time.isoformat())
 
-        # Store the processed data
-        task.processed_data = {
-            'pr_number': pr_number,
-            'title': pr_item.get('title', ''),
-            'timestamps': timestamps
-        }
-
-        return True
+        # Return successful result
+        return ProcessedPr(
+            pr_number=pr_number,
+            title=pr_item.get('title', ''),
+            timestamps=timestamps
+        )
 
     except requests.RequestException as e:
-        task.error_message = f"Request failed: {e}"
-        return False
+        return FailedPr(
+            pr_number=pr_number,
+            error_message=f"Request failed: {e}"
+        )
 
 
 def build_pr_search_query(owner: str, project: str,
@@ -424,16 +537,24 @@ def query_github_pr_pushes(owner: str, project: str,
     pbar = tqdm(total=total_prs, desc="Processing PRs", unit="PR")
     processed_count = 0
 
-    # Main processing loop with retry logic
+    # Main processing loop with intelligent rate limiting
+    # Track consecutive non-rate-limit errors globally for exponential backoff
+    consecutive_errors = 0
+
     while active_pr_tasks:
         task = active_pr_tasks.popleft()
 
-        success = process_single_pr(task, headers, owner, project,
-                                    start_dt, end_dt)
+        # Process the PR and get result
+        result = process_single_pr(
+            task, headers, owner, project, start_dt, end_dt
+        )
 
-        if success:
+        # Initialize sleep time for this iteration
+        sleep_time = BASE_DELAY
+        if isinstance(result, ProcessedPr):
             # Success - add to successful list and update progress
-            successful_prs.append(task)
+            successful_prs.append(result)
+            consecutive_errors = 0  # Reset global error count
             processed_count += 1
             pbar.update(1)
             pbar.set_postfix({
@@ -442,18 +563,14 @@ def query_github_pr_pushes(owner: str, project: str,
                 'retrying': len(active_pr_tasks)
             })
 
-        else:
-            # Failed - check if we should retry
+            # Use base delay for successful requests (already set as default)
+
+        elif isinstance(result, FailedPr):
+            # Rate limited - calculate delay and retry
             task.retries_remaining -= 1
-            if task.retries_remaining > 0:
-                # Add back to queue for retry
-                active_pr_tasks.append(task)
-                pbar.set_description(
-                    f"Processing PRs (PR #{task.pr_number} retrying)"
-                )
-            else:
+            if task.retries_remaining <= 0:
                 # Max retries exceeded - mark as failed
-                failed_prs.append(task)
+                failed_prs.append(result)
                 processed_count += 1
                 pbar.update(1)
                 pbar.set_postfix({
@@ -461,21 +578,58 @@ def query_github_pr_pushes(owner: str, project: str,
                     'failed': len(failed_prs),
                     'retrying': len(active_pr_tasks)
                 })
-                print(f"\n  ❌ PR #{task.pr_number} failed permanently: "
-                      f"{task.error_message}")
+                msg = (f"\n  ❌ PR #{task.pr_number} "
+                       f"rate limited too many times: ")
+                print(msg + f"{result.error_message}")
 
-        # Small delay between requests to be nice to the API
-        if active_pr_tasks or success:  # Only delay if more work to do
-            time.sleep(0.5)
+            else:
+                if result.is_rate_limited:
+                    consecutive_errors = 0  # Reset global error count
+                    # Calculate delay until rate limit reset
+                    current_time = datetime.datetime.now(datetime.timezone.utc)
+                    reset_time = result.rate_limit_reset_time
+                    if reset_time and reset_time > current_time:
+                        sleep_time = (reset_time - current_time).total_seconds()
+                else:
+                    # Fallback to exponential backoff if no reset time
+                    sleep_time = BASE_DELAY * (2 ** consecutive_errors)
+ 
+                # Add back to queue for retry
+                active_pr_tasks.append(task)
+                desc = (f"Processing PRs (rate limited, "
+                        f"retrying PR #{task.pr_number})")
+                pbar.set_description(desc)
+        else:
+            raise TypeError(f"Unknown result type: {type(result)}")
+
+
+        # Unified sleep logic - only sleep if there are more tasks to process
+        if active_pr_tasks:
+            sleep_time = max(sleep_time, BASE_DELAY)
+
+            if sleep_time > 2:
+                # Show detailed timing information
+                start_time_str = current_time.strftime('%H:%M:%S UTC')
+                print(f"   Wait started: {start_time_str}")
+                sleep_delta = datetime.timedelta(seconds=sleep_time)
+                print(f"   Wait duration: {sleep_delta}")
+                wake_time_str = reset_time.strftime('%H:%M:%S UTC')
+                print(f"   Target wake time: {wake_time_str}")
+                print("   Press Ctrl-C to abort if needed")
+            time.sleep(sleep_time)
 
     # Close progress bar
     pbar.close()
 
     # Collect results from successful PR processing
     all_pr_data = []
-    for task in successful_prs:
-        if task.processed_data:
-            all_pr_data.append(task.processed_data)
+    for processed_pr in successful_prs:
+        pr_data = {
+            'pr_number': processed_pr.pr_number,
+            'title': processed_pr.title,
+            'timestamps': processed_pr.timestamps
+        }
+        all_pr_data.append(pr_data)
 
     print("\nPR Processing Summary:")
     print(f"  ✅ Successfully processed: {len(successful_prs)}")
@@ -483,8 +637,8 @@ def query_github_pr_pushes(owner: str, project: str,
 
     if failed_prs:
         print("\nFailed PRs:")
-        for task in failed_prs:
-            print(f"  - PR #{task.pr_number}: {task.error_message}")
+        for failed_pr in failed_prs:
+            print(f"  - PR #{failed_pr.pr_number}: {failed_pr.error_message}")
 
     # Prepare processing statistics
     processing_stats = {
@@ -492,10 +646,10 @@ def query_github_pr_pushes(owner: str, project: str,
         'successfully_processed': len(successful_prs),
         'failed_to_process': len(failed_prs),
         'failed_pr_details': [{
-            'pr_number': task.pr_number,
-            'error': task.error_message,
-            'retries_attempted': 3 - task.retries_remaining
-        } for task in failed_prs]
+            'pr_number': failed_pr.pr_number,
+            'error': failed_pr.error_message,
+            'was_rate_limited': failed_pr.is_rate_limited
+        } for failed_pr in failed_prs]
     }
 
     # Calculate total timestamp events across all PRs
