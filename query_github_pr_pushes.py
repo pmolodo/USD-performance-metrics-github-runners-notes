@@ -208,12 +208,17 @@ def build_closed_prs_query(owner: str, project: str,
     return build_pr_search_query(owner, project, start_dt, end_dt, False)
 
 
-def search_prs_with_query(query: str, headers: dict) -> list:
+def search_prs_with_query(query: str, headers: dict,
+                          query_type: str = "PRs") -> list:
     """Execute a single search query and return all paginated results."""
     search_url = 'https://api.github.com/search/issues'
     all_prs = []
     page = 1
     per_page = 100
+
+    # Initialize progress bar for search pagination
+    pbar = tqdm(desc=f"Searching {query_type}", unit="PR")
+    total_count = None
 
     while True:
         params = {
@@ -233,11 +238,21 @@ def search_prs_with_query(query: str, headers: dict) -> list:
 
         data = response.json()
         items = data.get('items', [])
+        
+        # Get total count from first response to configure progress bar
+        if total_count is None:
+            total_count = data.get('total_count', 0)
+            pbar.total = total_count
+            pbar.set_description(f"Searching {query_type} (0/{total_count})")
 
         if not items:
             break
 
         all_prs.extend(items)
+        # Update progress bar to show actual PR progress
+        pbar.n = len(all_prs)
+        pbar.set_description(f"Searching {query_type} ({len(all_prs)}/{total_count})")
+        pbar.refresh()
 
         # Check if we've got all results
         if len(items) < per_page:
@@ -245,6 +260,11 @@ def search_prs_with_query(query: str, headers: dict) -> list:
 
         page += 1
 
+    # Final update to show completion and leave visible
+    pbar.n = len(all_prs)
+    pbar.set_description(f"Found {len(all_prs)} {query_type}")
+    pbar.refresh()
+    # Don't close the progress bar - leave it visible
     return all_prs
 
 
@@ -264,8 +284,8 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
     print(f"Closed PRs query: {closed_query}")
 
     # Execute both queries
-    open_prs = search_prs_with_query(open_query, headers)
-    closed_prs = search_prs_with_query(closed_query, headers)
+    open_prs = search_prs_with_query(open_query, headers, "open PRs")
+    closed_prs = search_prs_with_query(closed_query, headers, "closed PRs")
 
     print(f"Found {len(open_prs)} open PRs and {len(closed_prs)} closed PRs")
 
