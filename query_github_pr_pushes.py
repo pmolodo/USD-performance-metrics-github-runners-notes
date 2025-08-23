@@ -238,7 +238,7 @@ def search_prs_with_query(query: str, headers: dict,
 
         data = response.json()
         items = data.get('items', [])
-        
+
         # Get total count from first response to configure progress bar
         if total_count is None:
             total_count = data.get('total_count', 0)
