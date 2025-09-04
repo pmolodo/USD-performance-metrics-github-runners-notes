@@ -5,9 +5,10 @@
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
-from re import S
+from pathlib import Path
 import requests
 import sys
 import traceback
@@ -21,6 +22,141 @@ from tqdm import tqdm
 DEFAULT_PER_PAGE = 100
 BASE_DELAY = 0.5  # seconds
 MAX_EXPONENTIAL_DELAY = 300  # seconds
+
+###############################################################################
+# Cache management functions
+###############################################################################
+
+
+def get_cache_filename(url: str, params: Optional[dict] = None) -> str:
+    """
+    Generate a cache filename based on URL and parameters.
+
+    Args:
+        url: The API URL
+        params: Optional query parameters
+
+    Returns:
+        A filename safe for filesystem usage
+    """
+    # Create a unique hash from URL and params
+    cache_key = url
+    if params:
+        # Sort params for consistent hashing
+        sorted_params = sorted(params.items())
+        cache_key += "?" + "&".join(f"{k}={v}" for k, v in sorted_params)
+
+    # Create hash and include timestamp
+    url_hash = hashlib.md5(cache_key.encode()).hexdigest()[:16]
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    timestamp = timestamp.replace(":", "-")
+
+    return f"api_call_{url_hash}_{timestamp}.json"
+
+
+def ensure_cache_dir() -> Path:
+    """
+    Ensure the .cache directory exists and return its path.
+
+    Returns:
+        Path object for the .cache directory
+    """
+    cache_dir = Path(".cache")
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir
+
+
+def load_cache(url: str, params: Optional[dict] = None,
+               max_age_hours: int = 24) -> Optional[dict]:
+    """
+    Load cached API response if it exists and is recent enough.
+
+    Args:
+        url: The API URL
+        params: Optional query parameters
+        max_age_hours: Maximum age of cache in hours (default 24)
+
+    Returns:
+        Cached response data if found and valid, None otherwise
+    """
+    cache_dir = ensure_cache_dir()
+
+    # Create cache key hash for pattern matching
+    cache_key = url
+    if params:
+        sorted_params = sorted(params.items())
+        cache_key += "?" + "&".join(f"{k}={v}" for k, v in sorted_params)
+
+    url_hash = hashlib.md5(cache_key.encode()).hexdigest()[:16]
+    pattern = f"api_call_{url_hash}_*.json"
+
+    # Find matching cache files (sorted by modification time, newest first)
+    cache_files = sorted(cache_dir.glob(pattern),
+                         key=lambda x: x.stat().st_mtime,
+                         reverse=True)
+
+    if not cache_files:
+        return None
+
+    # Check the most recent cache file
+    cache_file = cache_files[0]
+
+    try:
+        # Check if cache is too old
+        file_mtime = datetime.datetime.fromtimestamp(
+            cache_file.stat().st_mtime)
+        cache_age = datetime.datetime.now() - file_mtime
+        if cache_age.total_seconds() > max_age_hours * 3600:
+            print(f"Cache file {cache_file.name} is too old "
+                  f"({cache_age}), ignoring")
+            return None
+
+        # Load and return cached data
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            cached_data = json.load(f)
+            print(f"Using cached response from {cache_file.name}")
+            return cached_data
+
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Warning: Could not load cache file {cache_file}: {e}")
+        return None
+
+
+def save_cache(url: str, params: Optional[dict] = None,
+               response_data: Optional[dict] = None) -> None:
+    """
+    Save API response to cache.
+
+    Args:
+        url: The API URL
+        params: Optional query parameters
+        response_data: The response data to cache
+    """
+    if response_data is None:
+        return
+
+    try:
+        cache_dir = ensure_cache_dir()
+        filename = get_cache_filename(url, params)
+        cache_file = cache_dir / filename
+
+        # Prepare cache data with metadata
+        cached_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cache_data = {
+            'url': url,
+            'params': params,
+            'cached_at': cached_at,
+            'response_data': response_data
+        }
+
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, indent=2)
+
+        print(f"Cached response to {filename}")
+
+    except OSError as e:
+        print(f"Warning: Could not save cache file: {e}")
+
 
 ###############################################################################
 # Data structures
@@ -235,13 +371,20 @@ def process_single_pr(
                         f'{owner}/{project}/'
                         f'issues/{pr_number}/timeline')
 
-        response = requests.get(timeline_url, headers=headers, timeout=30)
+        # Check cache first
+        cached_data = load_cache(timeline_url)
+        if cached_data:
+            timeline_events = cached_data['response_data']
+        else:
+            response = requests.get(timeline_url, headers=headers, timeout=30)
 
-        # Handle any non-200 response (including rate limiting)
-        if response.status_code != 200:
-            return FailedPr.from_response(pr_number, response)
+            # Handle any non-200 response (including rate limiting)
+            if response.status_code != 200:
+                return FailedPr.from_response(pr_number, response)
 
-        timeline_events = response.json()
+            timeline_events = response.json()
+            # Save successful response to cache
+            save_cache(timeline_url, None, timeline_events)
 
         # Process timeline events for commit-related activity
         for event in timeline_events:
@@ -359,14 +502,21 @@ def search_prs_with_query(query: str, headers: dict,
             'order': 'desc'
         }
 
-        response = requests.get(search_url, headers=headers, params=params,
-                                timeout=30)
-        if response.status_code != 200:
-            print(f"Error in search API: {response.status_code} - "
-                  f"{response.text}")
-            break
+        # Check cache first
+        cached_data = load_cache(search_url, params)
+        if cached_data:
+            data = cached_data['response_data']
+        else:
+            response = requests.get(search_url, headers=headers, params=params,
+                                    timeout=30)
+            if response.status_code != 200:
+                print(f"Error in search API: {response.status_code} - "
+                      f"{response.text}")
+                break
 
-        data = response.json()
+            data = response.json()
+            # Save successful response to cache
+            save_cache(search_url, params, data)
         items = data.get('items', [])
 
         # Get total count from first response to configure progress bar
@@ -593,7 +743,7 @@ def query_github_pr_pushes(owner: str, project: str,
                 else:
                     # Fallback to exponential backoff if no reset time
                     sleep_time = BASE_DELAY * (2 ** consecutive_errors)
- 
+
                 # Add back to queue for retry
                 active_pr_tasks.append(task)
                 desc = (f"Processing PRs (rate limited, "
@@ -602,18 +752,19 @@ def query_github_pr_pushes(owner: str, project: str,
         else:
             raise TypeError(f"Unknown result type: {type(result)}")
 
-
         # Unified sleep logic - only sleep if there are more tasks to process
         if active_pr_tasks:
             sleep_time = max(sleep_time, BASE_DELAY)
 
             if sleep_time > 2:
                 # Show detailed timing information
+                current_time = datetime.datetime.now(datetime.timezone.utc)
                 start_time_str = current_time.strftime('%H:%M:%S UTC')
                 print(f"   Wait started: {start_time_str}")
                 sleep_delta = datetime.timedelta(seconds=sleep_time)
                 print(f"   Wait duration: {sleep_delta}")
-                wake_time_str = reset_time.strftime('%H:%M:%S UTC')
+                wake_time = current_time + sleep_delta
+                wake_time_str = wake_time.strftime('%H:%M:%S UTC')
                 print(f"   Target wake time: {wake_time_str}")
                 print("   Press Ctrl-C to abort if needed")
             time.sleep(sleep_time)
