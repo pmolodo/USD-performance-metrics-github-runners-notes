@@ -2,9 +2,25 @@
 *.json
 *pr_push_times.json*
 
-# Python cache files
+# python byte-compiled / optimized files
 __pycache__/
-*.py[cod]
-*$py.class
+*.py[co]
+
+# Virtual environments
+.tox/
+.venv/
+_venv/
+
+# Linters / tools
+.bash_history
+.conan
+.mypy_cache
+
+# IDEs
+.idea/
+.vs/
+
+# OS - specific
+.DS_Store
 
 *.orig

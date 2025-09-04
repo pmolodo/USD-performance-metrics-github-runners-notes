@@ -1,0 +1,73 @@
+[tool.black]
+exclude = '''
+^/(
+  (
+    # root directories to exclude
+    \.DS_Store
+    | \.conan
+    | \.git
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | \.vs
+    | \.vscode
+    | _venv
+  )/
+  # any rooted files to ignore would go here
+)
+# unrooted paths here
+| __pycache__/
+'''
+# In different versions of black, there were 3 different ways to turn on
+# the same thing - splitting up of long string literals
+# experimental-string-processing = true  # raises a warning in modern black versions
+preview = true
+enable-unstable-feature = ['string_processing']
+
+line-length = 88
+
+[tool.isort]
+profile = 'black'
+lines_between_types = 1
+combine_as_imports = true
+line_length = 88
+
+[tool.ruff]
+line-length = 88
+ignore = [
+    "E402", # Module level import not at top of file
+]
+
+[tool.pylint.main]
+ignore = [
+    ".DS_Store",
+    ".conan",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".vs",
+    ".vscode",
+    "__pycache__",
+    "CVS",
+]
+ignore-paths = ["^\\.tox/.*$", "^\\.venv/.*$", "^\\_venv/.*$"]
+
+[tool.pylint."messages control"]
+disable = [
+    "import-outside-toplevel",
+    "line-too-long",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "subprocess-run-check",
+    "wrong-import-position",
+    # Until VSCode linting respects the .env file (or has some other way to add paths), "can't import" errors
+    # are useless: https://github.com/microsoft/vscode-python/issues/9185
+    "import-error",
+]
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint.typecheck]
+ignored-modules = ["winreg"]
