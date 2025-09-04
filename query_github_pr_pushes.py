@@ -295,14 +295,16 @@ def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
 
     Returns:
         tuple: (success: bool, data: dict or None, error_msg: str or None,
-                response: response or None)
-               - On success: (True, parsed_json_data, None, response_obj)
-               - On failure: (False, None, error_message, response_obj or None)
+                response: response or None, api_call_made: bool)
+               - On success: (True, parsed_json_data, None, response_obj,
+                              api_call_made)
+               - On failure: (False, None, error_message, response_obj or None,
+                              api_call_made)
     """
     # Check cache first
     cached_data = load_cache(url, params, verbosity=verbosity)
     if cached_data:
-        return True, cached_data['response_data'], None, None
+        return True, cached_data['response_data'], None, None, False
 
     # Make API request
     try:
@@ -315,16 +317,16 @@ def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
         # Handle non-200 responses
         if response.status_code != 200:
             error_msg = f"API error {response.status_code}: {response.text}"
-            return False, None, error_msg, response
+            return False, None, error_msg, response, True
 
         # Parse JSON and save to cache
         data = response.json()
         save_cache(url, params, data, verbosity=verbosity)
-        return True, data, None, response
+        return True, data, None, response, True
 
     except requests.RequestException as e:
         error_msg = f"Request failed: {e}"
-        return False, None, error_msg, None
+        return False, None, error_msg, None, False
 
 
 ###############################################################################
@@ -333,17 +335,22 @@ def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
 
 
 @dataclass
-class ProcessedPr:
-    """Result of successfully processing a PR."""
+class PrResult:
+    """Base class for PR processing results."""
     pr_number: int
+    api_call_made: bool
+
+
+@dataclass
+class ProcessedPr(PrResult):
+    """Result of successfully processing a PR."""
     title: str
     timestamps: list
 
 
 @dataclass
-class FailedPr:
+class FailedPr(PrResult):
     """Result of failed PR processing."""
-    pr_number: int
     error_message: str
     rate_limit_reset_time: Optional[datetime.datetime] = None
 
@@ -353,13 +360,15 @@ class FailedPr:
         return self.rate_limit_reset_time is not None
 
     @classmethod
-    def from_response(cls, pr_number: int, response) -> 'FailedPr':
+    def from_response(cls, pr_number: int, response,
+                      api_call_made: bool = True) -> 'FailedPr':
         """
         Create a FailedPr from any non-200 HTTP response.
 
         Args:
             pr_number: PR number for the FailedPr object
             response: HTTP response object with headers, status_code, text
+            api_call_made: Whether an API call was made to get this response
 
         Returns:
             FailedPr object with appropriate error handling
@@ -378,6 +387,7 @@ class FailedPr:
                 )
                 return cls(
                     pr_number=pr_number,
+                    api_call_made=api_call_made,
                     error_message=error_message,
                     rate_limit_reset_time=reset_time
                 )
@@ -395,6 +405,7 @@ class FailedPr:
                 )
                 return cls(
                     pr_number=pr_number,
+                    api_call_made=api_call_made,
                     error_message=error_message,
                     rate_limit_reset_time=reset_time
                 )
@@ -405,6 +416,7 @@ class FailedPr:
         )
         return cls(
             pr_number=pr_number,
+            api_call_made=api_call_made,
             error_message=error_message
         )
 
@@ -526,7 +538,8 @@ def process_single_pr(
         if not pr_created_str:
             return FailedPr(
                 pr_number=pr_number,
-                error_message="No creation timestamp found"
+                error_message="No creation timestamp found",
+                api_call_made=False
             )
 
         pr_created = parse_datetime_string(pr_created_str, True)
@@ -542,19 +555,21 @@ def process_single_pr(
                         f'issues/{pr_number}/timeline')
 
         # Make API call with caching
-        success, timeline_events, error_msg, response = cached_api_call(
-            timeline_url, headers, verbosity=verbosity)
+        success, timeline_events, error_msg, response, api_call_made = (
+            cached_api_call(timeline_url, headers, verbosity=verbosity))
 
         if not success:
             # For timeline API, we need to return a proper FailedPr
             if response is not None:
                 # We have a real response object from the failed request
-                return FailedPr.from_response(pr_number, response)
+                return FailedPr.from_response(pr_number, response,
+                                              api_call_made)
             else:
                 # Network/request error - create a basic FailedPr
                 return FailedPr(
                     pr_number=pr_number,
-                    error_message=f"Request failed: {error_msg}"
+                    error_message=f"Request failed: {error_msg}",
+                    api_call_made=api_call_made
                 )
 
         # Process timeline events for commit-related activity
@@ -572,13 +587,15 @@ def process_single_pr(
         return ProcessedPr(
             pr_number=pr_number,
             title=pr_item.get('title', ''),
-            timestamps=timestamps
+            timestamps=timestamps,
+            api_call_made=api_call_made
         )
 
     except requests.RequestException as e:
         return FailedPr(
             pr_number=pr_number,
-            error_message=f"Request failed: {e}"
+            error_message=f"Request failed: {e}",
+            api_call_made=False
         )
 
 
@@ -677,7 +694,7 @@ def search_prs_with_query(query: str, headers: dict,
         }
 
         # Make API call with caching
-        success, data, error_msg, _ = cached_api_call(
+        success, data, error_msg, _, _ = cached_api_call(
             search_url, headers, params, verbosity=verbosity)
 
         if not success or data is None:
@@ -926,7 +943,8 @@ def query_github_pr_pushes(owner: str, project: str,
             raise TypeError(f"Unknown result type: {type(result)}")
 
         # Unified sleep logic - only sleep if there are more tasks to process
-        if active_pr_tasks:
+        # and an API call was made (rate limiting applies)
+        if active_pr_tasks and result.api_call_made:
             sleep_time = max(sleep_time, BASE_DELAY)
 
             # Determine reason for sleep based on context
