@@ -103,7 +103,7 @@ class ProcessedPr(PrResult):
     """Result of successfully processing a PR."""
 
     title: str
-    timestamps: list
+    events: list
 
 
 @dataclass
@@ -591,9 +591,9 @@ def process_single_pr(
         pr_created = parse_datetime_string(pr_created_str, True)
 
         # Start with PR creation timestamp
-        timestamps = []
+        events = []
         if is_timestamp_in_range(pr_created, start_dt, end_dt):
-            timestamps.append(pr_created.isoformat())
+            events.append({"event": "created", "time": pr_created.isoformat()})
 
         # Get timeline events
         timeline_url = (
@@ -624,7 +624,8 @@ def process_single_pr(
         timeline_events = api_result.data
         if timeline_events:  # Ensure timeline_events is not None
             for event in timeline_events:
-                if event.get("event") in [
+                event_type = event.get("event")
+                if event_type in [
                     "committed",
                     "pushed",
                     "head_ref_force_pushed",
@@ -636,13 +637,15 @@ def process_single_pr(
                     if event_time_str:
                         event_time = parse_datetime_string(event_time_str, True)
                         if is_timestamp_in_range(event_time, start_dt, end_dt):
-                            timestamps.append(event_time.isoformat())
+                            events.append(
+                                {"event": event_type, "time": event_time.isoformat()}
+                            )
 
         # Return successful result
         return ProcessedPr(
             pr_number=pr_number,
             title=pr_item.get("title", ""),
-            timestamps=timestamps,
+            events=events,
             api_call_made=api_result.api_call_made,
         )
 
@@ -886,13 +889,13 @@ def query_github_pr_pushes(
     verbosity: int = 1,
 ):
     """
-    Query GitHub API for PR creation and commit event timestamps.
+    Query GitHub API for PR creation and commit events.
 
     Tracks when PRs are created and when new commits are added to PR branches
     using the timeline API, not individual commit authoring times.
 
     Filters PRs by lifetime overlap with time range, and filters all collected
-    timestamps to only include those within the specified time range.
+    events to only include those within the specified time range.
 
     Args:
         owner: Repository owner
@@ -1053,7 +1056,7 @@ def query_github_pr_pushes(
         pr_data = {
             "pr_number": processed_pr.pr_number,
             "title": processed_pr.title,
-            "timestamps": processed_pr.timestamps,
+            "events": processed_pr.events,
         }
         all_pr_data.append(pr_data)
 
@@ -1081,11 +1084,11 @@ def query_github_pr_pushes(
         ],
     }
 
-    # Calculate total timestamp events across all PRs
-    total_timestamp_events = sum(len(pr_data["timestamps"]) for pr_data in all_pr_data)
+    # Calculate total events across all PRs
+    total_events = sum(len(pr_data["events"]) for pr_data in all_pr_data)
 
     print(f"\nFound {len(all_pr_data)} PRs with push data.")
-    print(f"Total timestamp events across all PRs: {total_timestamp_events}")
+    print(f"Total events across all PRs: {total_events}")
 
     # Save results to JSON file
     output_data = {
@@ -1094,7 +1097,7 @@ def query_github_pr_pushes(
         "filters": {"start_time": start_time, "end_time": end_time},
         "processing_statistics": processing_stats,
         "total_prs_processed": len(all_pr_data),
-        "total_timestamp_events": total_timestamp_events,
+        "total_events": total_events,
         "prs": all_pr_data,
     }
 
