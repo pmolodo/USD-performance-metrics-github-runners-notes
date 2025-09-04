@@ -28,30 +28,98 @@ MAX_EXPONENTIAL_DELAY = 300  # seconds
 ###############################################################################
 
 
+def _build_cache_key(url: str, sorted_params: Optional[list] = None) -> str:
+    """
+    Build cache key from URL and sorted parameters.
+
+    Args:
+        url: The API URL
+        sorted_params: Pre-sorted list of (key, value) tuples
+
+    Returns:
+        Cache key string for hashing
+    """
+    cache_key = url
+    if sorted_params:
+        cache_key += "?" + "&".join(f"{k}={v}" for k, v in sorted_params)
+    return cache_key
+
+
 def get_cache_filename(url: str, params: Optional[dict] = None) -> str:
     """
-    Generate a cache filename based on URL and parameters.
+    Generate a human-readable cache filename based on URL and parameters.
 
     Args:
         url: The API URL
         params: Optional query parameters
 
     Returns:
-        A filename safe for filesystem usage
+        A human-readable filename safe for filesystem usage
     """
-    # Create a unique hash from URL and params
-    cache_key = url
+    # Extract API type and relevant info from URL
+    if "search/issues" in url:
+        api_type = "search-issues"
+        repo_info = ""
+    elif "/timeline" in url:
+        api_type = "timeline"
+        # Extract repo and PR info from timeline URL
+        # Format: /repos/{owner}/{project}/issues/{pr_number}/timeline
+        parts = url.split("/")
+        if len(parts) >= 7 and "repos" in url:
+            owner = parts[parts.index("repos") + 1]
+            project = parts[parts.index("repos") + 2]
+            if "issues" in parts:
+                pr_number = parts[parts.index("issues") + 1]
+                repo_info = f"_repo-{owner}-{project}_pr-{pr_number}"
+            else:
+                repo_info = f"_repo-{owner}-{project}"
+        else:
+            repo_info = ""
+    else:
+        # Generic API call
+        api_type = "api-call"
+        repo_info = ""
+
+    # Sort params once for both human-readable format and hash
+    sorted_params = None
+    param_str = ""
+
     if params:
-        # Sort params for consistent hashing
         sorted_params = sorted(params.items())
-        cache_key += "?" + "&".join(f"{k}={v}" for k, v in sorted_params)
 
-    # Create hash and include timestamp
+        # Format parameters in human-readable way
+        param_parts = []
+        for key, value in sorted_params:
+            # Make parameter names filesystem-safe
+            safe_key = str(key).replace("_", "-")
+            safe_value = str(value).replace("/", "-").replace(":", "-")
+            param_parts.append(f"{safe_key}-{safe_value}")
+
+        if param_parts:
+            param_str = "_" + "_".join(param_parts)
+
+    # Create hash for uniqueness using already sorted params
+    cache_key = _build_cache_key(url, sorted_params)
     url_hash = hashlib.md5(cache_key.encode()).hexdigest()[:16]
-    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    timestamp = timestamp.replace(":", "-")
 
-    return f"api_call_{url_hash}_{timestamp}.json"
+    # Create timestamp
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    timestamp = timestamp.replace(":", "-").replace(".", "-")
+
+    # Combine all parts: human_readable_hash_timestamp
+    filename = f"{api_type}{repo_info}{param_str}_{url_hash}_{timestamp}.json"
+
+    # Ensure filename is not too long (max 255 chars for most filesystems)
+    if len(filename) > 200:
+        # Truncate param_str if filename is too long
+        base_len = len(f"{api_type}{repo_info}_{url_hash}_{timestamp}.json")
+        max_param_len = 200 - base_len
+        if max_param_len > 0:
+            param_str = param_str[:max_param_len]
+        filename = (f"{api_type}{repo_info}{param_str}_"
+                    f"{url_hash}_{timestamp}.json")
+
+    return filename
 
 
 def ensure_cache_dir() -> Path:
@@ -81,14 +149,13 @@ def load_cache(url: str, params: Optional[dict] = None,
     """
     cache_dir = ensure_cache_dir()
 
-    # Create cache key hash for pattern matching
-    cache_key = url
-    if params:
-        sorted_params = sorted(params.items())
-        cache_key += "?" + "&".join(f"{k}={v}" for k, v in sorted_params)
-
+    # Create hash for exact matching (same logic as get_cache_filename)
+    sorted_params = sorted(params.items()) if params else None
+    cache_key = _build_cache_key(url, sorted_params)
     url_hash = hashlib.md5(cache_key.encode()).hexdigest()[:16]
-    pattern = f"api_call_{url_hash}_*.json"
+
+    # Create pattern to match files with this exact hash
+    pattern = f"*_{url_hash}_*.json"
 
     # Find matching cache files (sorted by modification time, newest first)
     cache_files = sorted(cache_dir.glob(pattern),
@@ -107,11 +174,14 @@ def load_cache(url: str, params: Optional[dict] = None,
             cache_file.stat().st_mtime)
         cache_age = datetime.datetime.now() - file_mtime
         if cache_age.total_seconds() > max_age_hours * 3600:
+            print(f"Cache file {cache_file.name} is too old "
+                  f"({cache_age}), ignoring")
             return None
 
         # Load and return cached data
         with open(cache_file, 'r', encoding='utf-8') as f:
             cached_data = json.load(f)
+            print(f"Using cached response from {cache_file.name}")
             return cached_data
 
     except (json.JSONDecodeError, OSError) as e:
@@ -734,7 +804,8 @@ def query_github_pr_pushes(owner: str, project: str,
                     current_time = datetime.datetime.now(datetime.timezone.utc)
                     reset_time = result.rate_limit_reset_time
                     if reset_time and reset_time > current_time:
-                        sleep_time = (reset_time - current_time).total_seconds()
+                        delta = reset_time - current_time
+                        sleep_time = delta.total_seconds()
                 else:
                     # Fallback to exponential backoff if no reset time
                     sleep_time = BASE_DELAY * (2 ** consecutive_errors)
