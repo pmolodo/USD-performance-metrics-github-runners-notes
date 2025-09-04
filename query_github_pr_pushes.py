@@ -615,7 +615,7 @@ def process_single_pr(
         timeline_events = api_result.data
         if timeline_events:  # Ensure timeline_events is not None
             for event in timeline_events:
-                if event.get('event') in ['committed', 'pushed']:
+                if event.get('event') in ['committed', 'pushed', 'head_ref_force_pushed', 'head_ref_restored']:
                     event_time_str = event.get('created_at')
                     if event_time_str:
                         event_time = parse_datetime_string(event_time_str,
