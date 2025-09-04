@@ -104,7 +104,7 @@ def get_cache_filename(url: str, params: Optional[dict] = None) -> str:
     url_hash = hashlib.md5(cache_key.encode()).hexdigest()[:16]
 
     # Create timestamp
-    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    timestamp = get_current_utc_time().isoformat()
     timestamp = timestamp.replace(":", "-").replace(".", "-")
 
     # Combine all parts: human_readable_hash_timestamp
@@ -215,7 +215,7 @@ def save_cache(url: str, params: Optional[dict] = None,
         cache_file = cache_dir / filename
 
         # Prepare cache data with metadata
-        cached_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cached_at = get_current_utc_time().isoformat()
         cache_data = {
             'url': url,
             'params': params,
@@ -231,6 +231,69 @@ def save_cache(url: str, params: Optional[dict] = None,
 
     except OSError as e:
         print(f"Warning: Could not save cache file: {e}")
+
+
+def get_current_utc_time() -> datetime.datetime:
+    """
+    Get the current UTC time.
+
+    Returns:
+        Current datetime in UTC timezone
+    """
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
+                    verbosity: int = 1, timeout: int = 30):
+    """
+    Make an API call with caching support.
+
+    This function implements the common pattern of:
+    1. Check cache first
+    2. If not cached, make HTTP request
+    3. Handle non-200 responses
+    4. Parse JSON response
+    5. Save successful response to cache
+
+    Args:
+        url: The API URL to call
+        headers: HTTP headers for the request
+        params: Optional query parameters
+        verbosity: Verbosity level for output
+        timeout: Request timeout in seconds
+
+    Returns:
+        tuple: (success: bool, data: dict or None, error_msg: str or None,
+                response: response or None)
+               - On success: (True, parsed_json_data, None, response_obj)
+               - On failure: (False, None, error_message, response_obj or None)
+    """
+    # Check cache first
+    cached_data = load_cache(url, params, verbosity=verbosity)
+    if cached_data:
+        return True, cached_data['response_data'], None, None
+
+    # Make API request
+    try:
+        if params:
+            response = requests.get(url, headers=headers, params=params,
+                                    timeout=timeout)
+        else:
+            response = requests.get(url, headers=headers, timeout=timeout)
+
+        # Handle non-200 responses
+        if response.status_code != 200:
+            error_msg = f"API error {response.status_code}: {response.text}"
+            return False, None, error_msg, response
+
+        # Parse JSON and save to cache
+        data = response.json()
+        save_cache(url, params, data, verbosity=verbosity)
+        return True, data, None, response
+
+    except requests.RequestException as e:
+        error_msg = f"Request failed: {e}"
+        return False, None, error_msg, None
 
 
 ###############################################################################
@@ -291,7 +354,7 @@ class FailedPr:
             # Try retry-after (secondary rate limits)
             retry_seconds = _get_header_int(response.headers, 'retry-after')
             if retry_seconds is not None:
-                current_time = datetime.datetime.now(datetime.timezone.utc)
+                current_time = get_current_utc_time()
                 delta = datetime.timedelta(seconds=retry_seconds)
                 reset_time = current_time + delta
                 error_message = (
@@ -447,30 +510,32 @@ def process_single_pr(
                         f'{owner}/{project}/'
                         f'issues/{pr_number}/timeline')
 
-        # Check cache first
-        cached_data = load_cache(timeline_url, verbosity=verbosity)
-        if cached_data:
-            timeline_events = cached_data['response_data']
-        else:
-            response = requests.get(timeline_url, headers=headers, timeout=30)
+        # Make API call with caching
+        success, timeline_events, error_msg, response = cached_api_call(
+            timeline_url, headers, verbosity=verbosity)
 
-            # Handle any non-200 response (including rate limiting)
-            if response.status_code != 200:
+        if not success:
+            # For timeline API, we need to return a proper FailedPr
+            if response is not None:
+                # We have a real response object from the failed request
                 return FailedPr.from_response(pr_number, response)
-
-            timeline_events = response.json()
-            # Save successful response to cache
-            save_cache(timeline_url, None, timeline_events,
-                       verbosity=verbosity)
+            else:
+                # Network/request error - create a basic FailedPr
+                return FailedPr(
+                    pr_number=pr_number,
+                    error_message=f"Request failed: {error_msg}"
+                )
 
         # Process timeline events for commit-related activity
-        for event in timeline_events:
-            if event.get('event') in ['committed', 'pushed']:
-                event_time_str = event.get('created_at')
-                if event_time_str:
-                    event_time = parse_datetime_string(event_time_str, True)
-                    if is_timestamp_in_range(event_time, start_dt, end_dt):
-                        timestamps.append(event_time.isoformat())
+        if timeline_events:  # Ensure timeline_events is not None
+            for event in timeline_events:
+                if event.get('event') in ['committed', 'pushed']:
+                    event_time_str = event.get('created_at')
+                    if event_time_str:
+                        event_time = parse_datetime_string(event_time_str,
+                                                           True)
+                        if is_timestamp_in_range(event_time, start_dt, end_dt):
+                            timestamps.append(event_time.isoformat())
 
         # Return successful result
         return ProcessedPr(
@@ -580,21 +645,14 @@ def search_prs_with_query(query: str, headers: dict,
             'order': 'desc'
         }
 
-        # Check cache first
-        cached_data = load_cache(search_url, params, verbosity=verbosity)
-        if cached_data:
-            data = cached_data['response_data']
-        else:
-            response = requests.get(search_url, headers=headers, params=params,
-                                    timeout=30)
-            if response.status_code != 200:
-                print(f"Error in search API: {response.status_code} - "
-                      f"{response.text}")
-                break
+        # Make API call with caching
+        success, data, error_msg, _ = cached_api_call(
+            search_url, headers, params, verbosity=verbosity)
 
-            data = response.json()
-            # Save successful response to cache
-            save_cache(search_url, params, data, verbosity=verbosity)
+        if not success or data is None:
+            print(f"Error in search API: {error_msg}")
+            break
+
         items = data.get('items', [])
 
         # Get total count from first response to configure progress bar
@@ -819,7 +877,7 @@ def query_github_pr_pushes(owner: str, project: str,
                 if result.is_rate_limited:
                     consecutive_errors = 0  # Reset global error count
                     # Calculate delay until rate limit reset
-                    current_time = datetime.datetime.now(datetime.timezone.utc)
+                    current_time = get_current_utc_time()
                     reset_time = result.rate_limit_reset_time
                     if reset_time and reset_time > current_time:
                         delta = reset_time - current_time
@@ -842,7 +900,7 @@ def query_github_pr_pushes(owner: str, project: str,
 
             if sleep_time > 2:
                 # Show detailed timing information
-                current_time = datetime.datetime.now(datetime.timezone.utc)
+                current_time = get_current_utc_time()
                 start_time_str = current_time.strftime('%H:%M:%S UTC')
                 print(f"   Wait started: {start_time_str}")
                 sleep_delta = datetime.timedelta(seconds=sleep_time)
