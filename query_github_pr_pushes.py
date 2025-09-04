@@ -14,7 +14,6 @@ import traceback
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional
 from tqdm import tqdm
 
 # Constants
@@ -39,7 +38,7 @@ def get_current_utc_time() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def _get_header_int(headers, header_name: str) -> Optional[int]:
+def _get_header_int(headers, header_name: str) -> int | None:
     """
     Safely get a header value and cast to int.
 
@@ -85,7 +84,7 @@ class FailedApiCall(ApiCallResult):
     """Result of a failed API call."""
 
     error_message: str
-    response: Optional[object] = None
+    response: object | None = None
 
 
 @dataclass
@@ -109,7 +108,7 @@ class FailedPr(PrResult):
     """Result of failed PR processing."""
 
     error_message: str
-    rate_limit_reset_time: Optional[datetime.datetime] = None
+    rate_limit_reset_time: datetime.datetime | None = None
 
     @property
     def is_rate_limited(self) -> bool:
@@ -198,7 +197,7 @@ class PRTask:
 ###############################################################################
 
 
-def _build_cache_key(url: str, sorted_params: Optional[list] = None) -> str:
+def _build_cache_key(url: str, sorted_params: list | None = None) -> str:
     """
     Build cache key from URL and sorted parameters.
 
@@ -215,7 +214,7 @@ def _build_cache_key(url: str, sorted_params: Optional[list] = None) -> str:
     return cache_key
 
 
-def get_cache_filename(url: str, params: Optional[dict] = None) -> str:
+def get_cache_filename(url: str, params: dict | None = None) -> str:
     """
     Generate a human-readable cache filename based on URL and parameters.
 
@@ -304,8 +303,8 @@ def ensure_cache_dir() -> Path:
 
 
 def load_cache(
-    url: str, params: Optional[dict] = None, max_age_hours: int = 24, verbosity: int = 1
-) -> Optional[dict]:
+    url: str, params: dict | None = None, max_age_hours: int = 24, verbosity: int = 1
+) -> dict | None:
     """
     Load cached API response if it exists and is recent enough.
 
@@ -365,8 +364,8 @@ def load_cache(
 
 def save_cache(
     url: str,
-    params: Optional[dict] = None,
-    response_data: Optional[dict] = None,
+    params: dict | None = None,
+    response_data: dict | None = None,
     verbosity: int = 1,
 ) -> None:
     """
@@ -444,7 +443,7 @@ def sleep_with_timing(
 def cached_api_call(
     url: str,
     headers: dict,
-    params: Optional[dict] = None,
+    params: dict | None = None,
     verbosity: int = 1,
     timeout: int = 30,
 ) -> SuccessfulApiCall | FailedApiCall:
@@ -533,8 +532,8 @@ def parse_datetime_string(
 
 def is_timestamp_in_range(
     timestamp: datetime.datetime,
-    start_dt: Optional[datetime.datetime],
-    end_dt: Optional[datetime.datetime],
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
 ) -> bool:
     """
     Check if a timestamp falls within the specified time range.
@@ -557,8 +556,8 @@ def process_single_pr(
     headers: dict,
     owner: str,
     project: str,
-    start_dt: Optional[datetime.datetime],
-    end_dt: Optional[datetime.datetime],
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
     verbosity: int = 1,
 ) -> ProcessedPr | FailedPr:
     """Process a single PR to extract timeline data.
@@ -654,8 +653,8 @@ def process_single_pr(
 def build_pr_search_query(
     owner: str,
     project: str,
-    start_dt: Optional[datetime.datetime],
-    end_dt: Optional[datetime.datetime],
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
     is_open: bool,
 ) -> str:
     """
@@ -701,8 +700,8 @@ def build_pr_search_query(
 def build_open_prs_query(
     owner: str,
     project: str,
-    start_dt: Optional[datetime.datetime],
-    end_dt: Optional[datetime.datetime],
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
 ) -> str:
     """Build GitHub search query to find open PRs."""
     return build_pr_search_query(owner, project, start_dt, end_dt, True)
@@ -711,8 +710,8 @@ def build_open_prs_query(
 def build_closed_prs_query(
     owner: str,
     project: str,
-    start_dt: Optional[datetime.datetime],
-    end_dt: Optional[datetime.datetime],
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
 ) -> str:
     """Build query to find closed PRs with activity after start_dt."""
     return build_pr_search_query(owner, project, start_dt, end_dt, False)
@@ -722,7 +721,7 @@ def search_prs_with_query(
     query: str,
     headers: dict,
     query_type: str = "PRs",
-    max_results: Optional[int] = None,
+    max_results: int | None = None,
     verbosity: int = 1,
 ) -> list:
     """Execute a single search query and return all paginated results."""
@@ -808,9 +807,9 @@ def search_filtered_prs(
     owner: str,
     project: str,
     headers: dict,
-    start_dt: Optional[datetime.datetime],
-    end_dt: Optional[datetime.datetime],
-    max_prs: Optional[int] = None,
+    start_dt: datetime.datetime | None,
+    end_dt: datetime.datetime | None,
+    max_prs: int | None = None,
     verbosity: int = 1,
 ):
     """Use search API to get PRs filtered by date range.
@@ -875,11 +874,11 @@ def search_filtered_prs(
 def query_github_pr_pushes(
     owner: str,
     project: str,
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    token: Optional[str] = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    token: str | None = None,
     output_file: str = "pr_push_times.json",
-    max_prs: Optional[int] = None,
+    max_prs: int | None = None,
     verbosity: int = 1,
 ):
     """
