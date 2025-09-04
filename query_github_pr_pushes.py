@@ -107,14 +107,11 @@ def load_cache(url: str, params: Optional[dict] = None,
             cache_file.stat().st_mtime)
         cache_age = datetime.datetime.now() - file_mtime
         if cache_age.total_seconds() > max_age_hours * 3600:
-            print(f"Cache file {cache_file.name} is too old "
-                  f"({cache_age}), ignoring")
             return None
 
         # Load and return cached data
         with open(cache_file, 'r', encoding='utf-8') as f:
             cached_data = json.load(f)
-            print(f"Using cached response from {cache_file.name}")
             return cached_data
 
     except (json.JSONDecodeError, OSError) as e:
@@ -151,8 +148,6 @@ def save_cache(url: str, params: Optional[dict] = None,
 
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump(cache_data, f, indent=2)
-
-        print(f"Cached response to {filename}")
 
     except OSError as e:
         print(f"Warning: Could not save cache file: {e}")
