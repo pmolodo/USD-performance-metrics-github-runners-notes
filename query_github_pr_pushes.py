@@ -7,13 +7,16 @@ import datetime
 import hashlib
 import json
 import os
-from pathlib import Path
-import requests
 import sys
-import traceback
 import time
+import traceback
+
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
+
+import requests
+
 from tqdm import tqdm
 
 # Constants
@@ -56,7 +59,7 @@ def _get_header_int(headers, header_name: str) -> int | None:
     try:
         return int(header_value)
     except (ValueError, TypeError) as e:
-        print(f"Warning: Invalid {header_name} header: " f"{header_value!r} ({e})")
+        print(f"Warning: Invalid {header_name} header: {header_value!r} ({e})")
         return None
 
 
@@ -285,7 +288,7 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
         max_param_len = 200 - base_len
         if max_param_len > 0:
             param_str = param_str[:max_param_len]
-        filename = f"{api_type}{repo_info}{param_str}_" f"{url_hash}_{timestamp}.json"
+        filename = f"{api_type}{repo_info}{param_str}_{url_hash}_{timestamp}.json"
 
     return filename
 
@@ -345,8 +348,7 @@ def load_cache(
         if cache_age.total_seconds() > max_age_hours * 3600:
             if verbosity >= CACHE_VERBOSITY:
                 print(
-                    f"Cache file {cache_file.name} is too old "
-                    f"({cache_age}), ignoring"
+                    f"Cache file {cache_file.name} is too old ({cache_age}), ignoring"
                 )
             return None
 
@@ -595,7 +597,7 @@ def process_single_pr(
 
         # Get timeline events
         timeline_url = (
-            f"https://api.github.com/repos/"
+            "https://api.github.com/repos/"
             f"{owner}/{project}/"
             f"issues/{pr_number}/timeline"
         )
@@ -614,7 +616,7 @@ def process_single_pr(
                 # Network/request error - create a basic FailedPr
                 return FailedPr(
                     pr_number=pr_number,
-                    error_message=f"Request failed: " f"{api_result.error_message}",
+                    error_message=f"Request failed: {api_result.error_message}",
                     api_call_made=api_result.api_call_made,
                 )
 
@@ -1002,7 +1004,7 @@ def query_github_pr_pushes(
                         "retrying": len(active_pr_tasks),
                     }
                 )
-                msg = f"\n  ❌ PR #{task.pr_number} " f"rate limited too many times: "
+                msg = f"\n  ❌ PR #{task.pr_number} rate limited too many times: "
                 print(msg + f"{result.error_message}")
 
             else:
@@ -1020,9 +1022,7 @@ def query_github_pr_pushes(
 
                 # Add back to queue for retry
                 active_pr_tasks.append(task)
-                desc = (
-                    f"Processing PRs (rate limited, " f"retrying PR #{task.pr_number})"
-                )
+                desc = f"Processing PRs (rate limited, retrying PR #{task.pr_number})"
                 pbar.set_description(desc)
         else:
             raise TypeError(f"Unknown result type: {type(result)}")
@@ -1117,15 +1117,15 @@ def get_parser():
     parser.add_argument("project", help="The name of the github project")
     parser.add_argument(
         "--start",
-        help="Optional start time filter " "(ISO format, e.g., 2023-01-01T00:00:00)",
+        help="Optional start time filter (ISO format, e.g., 2023-01-01T00:00:00)",
     )
     parser.add_argument(
         "--end",
-        help="Optional end time filter " "(ISO format, e.g., 2023-12-31T23:59:59)",
+        help="Optional end time filter (ISO format, e.g., 2023-12-31T23:59:59)",
     )
     parser.add_argument(
         "--token",
-        help="GitHub personal access token " "(can also use GITHUB_TOKEN env var)",
+        help="GitHub personal access token (can also use GITHUB_TOKEN env var)",
     )
     parser.add_argument(
         "--output", default="pr_push_times.json", help="Output JSON file path"
@@ -1138,7 +1138,7 @@ def get_parser():
         "--verbose",
         action="count",
         default=1,
-        help="Increase verbosity level " "(use -v, -vv, -vvv, etc.)",
+        help="Increase verbosity level (use -v, -vv, -vvv, etc.)",
     )
     return parser
 
