@@ -1,5 +1,6 @@
 # JSON output files from query scripts
 *.json
+*pr_push_times.json*
 
 # Python cache files
 __pycache__/
