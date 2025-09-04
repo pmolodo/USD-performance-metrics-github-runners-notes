@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-"""Query a github project for all times that pushes were made to a PR.
-"""
+"""Query a github project for all times that pushes were made to a PR."""
 
 import argparse
 import datetime
@@ -58,8 +57,7 @@ def _get_header_int(headers, header_name: str) -> Optional[int]:
     try:
         return int(header_value)
     except (ValueError, TypeError) as e:
-        print(f"Warning: Invalid {header_name} header: "
-              f"{header_value!r} ({e})")
+        print(f"Warning: Invalid {header_name} header: " f"{header_value!r} ({e})")
         return None
 
 
@@ -71,18 +69,21 @@ def _get_header_int(headers, header_name: str) -> Optional[int]:
 @dataclass
 class ApiCallResult:
     """Base class for API call results."""
+
     api_call_made: bool
 
 
 @dataclass
 class SuccessfulApiCall(ApiCallResult):
     """Result of a successful API call."""
+
     data: dict
 
 
 @dataclass
 class FailedApiCall(ApiCallResult):
     """Result of a failed API call."""
+
     error_message: str
     response: Optional[object] = None
 
@@ -90,6 +91,7 @@ class FailedApiCall(ApiCallResult):
 @dataclass
 class PrResult:
     """Base class for PR processing results."""
+
     pr_number: int
     api_call_made: bool
 
@@ -97,6 +99,7 @@ class PrResult:
 @dataclass
 class ProcessedPr(PrResult):
     """Result of successfully processing a PR."""
+
     title: str
     timestamps: list
 
@@ -104,6 +107,7 @@ class ProcessedPr(PrResult):
 @dataclass
 class FailedPr(PrResult):
     """Result of failed PR processing."""
+
     error_message: str
     rate_limit_reset_time: Optional[datetime.datetime] = None
 
@@ -113,8 +117,9 @@ class FailedPr(PrResult):
         return self.rate_limit_reset_time is not None
 
     @classmethod
-    def from_response(cls, pr_number: int, response,
-                      api_call_made: bool = True) -> 'FailedPr':
+    def from_response(
+        cls, pr_number: int, response, api_call_made: bool = True
+    ) -> "FailedPr":
         """
         Create a FailedPr from any non-200 HTTP response.
 
@@ -129,7 +134,7 @@ class FailedPr(PrResult):
         # Handle rate limiting (403/429) with special reset time parsing
         if response.status_code in [403, 429]:
             # Try x-ratelimit-reset first (primary rate limits)
-            reset_ts = _get_header_int(response.headers, 'x-ratelimit-reset')
+            reset_ts = _get_header_int(response.headers, "x-ratelimit-reset")
             if reset_ts is not None:
                 reset_time = datetime.datetime.fromtimestamp(
                     reset_ts, tz=datetime.timezone.utc
@@ -142,11 +147,11 @@ class FailedPr(PrResult):
                     pr_number=pr_number,
                     api_call_made=api_call_made,
                     error_message=error_message,
-                    rate_limit_reset_time=reset_time
+                    rate_limit_reset_time=reset_time,
                 )
 
             # Try retry-after (secondary rate limits)
-            retry_seconds = _get_header_int(response.headers, 'retry-after')
+            retry_seconds = _get_header_int(response.headers, "retry-after")
             if retry_seconds is not None:
                 current_time = get_current_utc_time()
                 delta = datetime.timedelta(seconds=retry_seconds)
@@ -160,30 +165,29 @@ class FailedPr(PrResult):
                     pr_number=pr_number,
                     api_call_made=api_call_made,
                     error_message=error_message,
-                    rate_limit_reset_time=reset_time
+                    rate_limit_reset_time=reset_time,
                 )
 
         # Generic HTTP error (including 403/429 without rate limit headers)
-        error_message = (
-            f"HTTP error {response.status_code}: {response.text}"
-        )
+        error_message = f"HTTP error {response.status_code}: {response.text}"
         return cls(
             pr_number=pr_number,
             api_call_made=api_call_made,
-            error_message=error_message
+            error_message=error_message,
         )
 
 
 @dataclass
 class PRTask:
     """Represents a PR processing task with retry information."""
+
     pr_item: dict
     retries_remaining: int = 3
 
     @property
     def pr_number(self) -> int:
         """Get PR number from pr_item, raising RuntimeError if missing."""
-        number = self.pr_item.get('number')
+        number = self.pr_item.get("number")
         if number is None:
             raise RuntimeError("PR item is missing 'number' field")
         return number
@@ -282,8 +286,7 @@ def get_cache_filename(url: str, params: Optional[dict] = None) -> str:
         max_param_len = 200 - base_len
         if max_param_len > 0:
             param_str = param_str[:max_param_len]
-        filename = (f"{api_type}{repo_info}{param_str}_"
-                    f"{url_hash}_{timestamp}.json")
+        filename = f"{api_type}{repo_info}{param_str}_" f"{url_hash}_{timestamp}.json"
 
     return filename
 
@@ -300,9 +303,9 @@ def ensure_cache_dir() -> Path:
     return cache_dir
 
 
-def load_cache(url: str, params: Optional[dict] = None,
-               max_age_hours: int = 24,
-               verbosity: int = 1) -> Optional[dict]:
+def load_cache(
+    url: str, params: Optional[dict] = None, max_age_hours: int = 24, verbosity: int = 1
+) -> Optional[dict]:
     """
     Load cached API response if it exists and is recent enough.
 
@@ -326,9 +329,9 @@ def load_cache(url: str, params: Optional[dict] = None,
     pattern = f"*_{url_hash}_*.json"
 
     # Find matching cache files (sorted by modification time, newest first)
-    cache_files = sorted(cache_dir.glob(pattern),
-                         key=lambda x: x.stat().st_mtime,
-                         reverse=True)
+    cache_files = sorted(
+        cache_dir.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True
+    )
 
     if not cache_files:
         return None
@@ -338,17 +341,18 @@ def load_cache(url: str, params: Optional[dict] = None,
 
     try:
         # Check if cache is too old
-        file_mtime = datetime.datetime.fromtimestamp(
-            cache_file.stat().st_mtime)
+        file_mtime = datetime.datetime.fromtimestamp(cache_file.stat().st_mtime)
         cache_age = datetime.datetime.now() - file_mtime
         if cache_age.total_seconds() > max_age_hours * 3600:
             if verbosity >= CACHE_VERBOSITY:
-                print(f"Cache file {cache_file.name} is too old "
-                      f"({cache_age}), ignoring")
+                print(
+                    f"Cache file {cache_file.name} is too old "
+                    f"({cache_age}), ignoring"
+                )
             return None
 
         # Load and return cached data
-        with open(cache_file, 'r', encoding='utf-8') as f:
+        with open(cache_file, "r", encoding="utf-8") as f:
             cached_data = json.load(f)
             if verbosity >= CACHE_VERBOSITY:
                 print(f"Using cached response from {cache_file.name}")
@@ -359,9 +363,12 @@ def load_cache(url: str, params: Optional[dict] = None,
         return None
 
 
-def save_cache(url: str, params: Optional[dict] = None,
-               response_data: Optional[dict] = None,
-               verbosity: int = 1) -> None:
+def save_cache(
+    url: str,
+    params: Optional[dict] = None,
+    response_data: Optional[dict] = None,
+    verbosity: int = 1,
+) -> None:
     """
     Save API response to cache.
 
@@ -382,13 +389,13 @@ def save_cache(url: str, params: Optional[dict] = None,
         # Prepare cache data with metadata
         cached_at = get_current_utc_time().isoformat()
         cache_data = {
-            'url': url,
-            'params': params,
-            'cached_at': cached_at,
-            'response_data': response_data
+            "url": url,
+            "params": params,
+            "cached_at": cached_at,
+            "response_data": response_data,
         }
 
-        with open(cache_file, 'w', encoding='utf-8') as f:
+        with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, indent=2)
 
         if verbosity >= CACHE_VERBOSITY:
@@ -398,8 +405,9 @@ def save_cache(url: str, params: Optional[dict] = None,
         print(f"Warning: Could not save cache file: {e}")
 
 
-def sleep_with_timing(sleep_seconds: float, verbosity: int = 1,
-                      reason: str = "rate limiting"):
+def sleep_with_timing(
+    sleep_seconds: float, verbosity: int = 1, reason: str = "rate limiting"
+):
     """
     Sleep for the specified duration with optional timing information.
 
@@ -416,12 +424,12 @@ def sleep_with_timing(sleep_seconds: float, verbosity: int = 1,
     # verbosity)
     if sleep_seconds > 2:
         current_time = get_current_utc_time()
-        start_time_str = current_time.strftime('%H:%M:%S UTC')
+        start_time_str = current_time.strftime("%H:%M:%S UTC")
         print(f"   Wait started: {start_time_str}")
         sleep_delta = datetime.timedelta(seconds=sleep_seconds)
         print(f"   Wait duration: {sleep_delta}")
         wake_time = current_time + sleep_delta
-        wake_time_str = wake_time.strftime('%H:%M:%S UTC')
+        wake_time_str = wake_time.strftime("%H:%M:%S UTC")
         print(f"   Target wake time: {wake_time_str}")
         print("   Press Ctrl-C to abort if needed")
 
@@ -433,9 +441,13 @@ def sleep_with_timing(sleep_seconds: float, verbosity: int = 1,
 ###############################################################################
 
 
-def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
-                    verbosity: int = 1, timeout: int = 30
-                    ) -> SuccessfulApiCall | FailedApiCall:
+def cached_api_call(
+    url: str,
+    headers: dict,
+    params: Optional[dict] = None,
+    verbosity: int = 1,
+    timeout: int = 30,
+) -> SuccessfulApiCall | FailedApiCall:
     """
     Make an API call with caching support.
 
@@ -459,16 +471,14 @@ def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
     # Check cache first
     cached_data = load_cache(url, params, verbosity=verbosity)
     if cached_data:
-        return SuccessfulApiCall(
-            api_call_made=False,
-            data=cached_data['response_data']
-        )
+        return SuccessfulApiCall(api_call_made=False, data=cached_data["response_data"])
 
     # Make API request
     try:
         if params:
-            response = requests.get(url, headers=headers, params=params,
-                                    timeout=timeout)
+            response = requests.get(
+                url, headers=headers, params=params, timeout=timeout
+            )
         else:
             response = requests.get(url, headers=headers, timeout=timeout)
 
@@ -476,25 +486,17 @@ def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
         if response.status_code != 200:
             error_msg = f"API error {response.status_code}: {response.text}"
             return FailedApiCall(
-                api_call_made=True,
-                error_message=error_msg,
-                response=response
+                api_call_made=True, error_message=error_msg, response=response
             )
 
         # Parse JSON and save to cache
         data = response.json()
         save_cache(url, params, data, verbosity=verbosity)
-        return SuccessfulApiCall(
-            api_call_made=True,
-            data=data
-        )
+        return SuccessfulApiCall(api_call_made=True, data=data)
 
     except requests.RequestException as e:
         error_msg = f"Request failed: {e}"
-        return FailedApiCall(
-            api_call_made=False,
-            error_message=error_msg
-        )
+        return FailedApiCall(api_call_made=False, error_message=error_msg)
 
 
 ###############################################################################
@@ -502,9 +504,9 @@ def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
 ###############################################################################
 
 
-def parse_datetime_string(dt_string: str,
-                          is_github_api_format: bool = False
-                          ) -> datetime.datetime:
+def parse_datetime_string(
+    dt_string: str, is_github_api_format: bool = False
+) -> datetime.datetime:
     """
     Convert a datetime string to a timezone-aware datetime object.
 
@@ -518,7 +520,7 @@ def parse_datetime_string(dt_string: str,
     """
     if is_github_api_format:
         # GitHub API uses 'Z' suffix which needs to be converted to '+00:00'
-        dt_string = dt_string.replace('Z', '+00:00')
+        dt_string = dt_string.replace("Z", "+00:00")
 
     dt = datetime.datetime.fromisoformat(dt_string)
 
@@ -529,9 +531,11 @@ def parse_datetime_string(dt_string: str,
     return dt
 
 
-def is_timestamp_in_range(timestamp: datetime.datetime,
-                          start_dt: Optional[datetime.datetime],
-                          end_dt: Optional[datetime.datetime]) -> bool:
+def is_timestamp_in_range(
+    timestamp: datetime.datetime,
+    start_dt: Optional[datetime.datetime],
+    end_dt: Optional[datetime.datetime],
+) -> bool:
     """
     Check if a timestamp falls within the specified time range.
 
@@ -543,16 +547,19 @@ def is_timestamp_in_range(timestamp: datetime.datetime,
     Returns:
         True if timestamp is within range, False otherwise
     """
-    return ((start_dt is None or timestamp >= start_dt) and
-            (end_dt is None or timestamp <= end_dt))
+    return (start_dt is None or timestamp >= start_dt) and (
+        end_dt is None or timestamp <= end_dt
+    )
 
 
 def process_single_pr(
-        task: PRTask, headers: dict,
-        owner: str, project: str,
-        start_dt: Optional[datetime.datetime],
-        end_dt: Optional[datetime.datetime],
-        verbosity: int = 1
+    task: PRTask,
+    headers: dict,
+    owner: str,
+    project: str,
+    start_dt: Optional[datetime.datetime],
+    end_dt: Optional[datetime.datetime],
+    verbosity: int = 1,
 ) -> ProcessedPr | FailedPr:
     """Process a single PR to extract timeline data.
 
@@ -572,12 +579,12 @@ def process_single_pr(
 
     try:
         # Get PR creation time (always included)
-        pr_created_str = pr_item.get('created_at')
+        pr_created_str = pr_item.get("created_at")
         if not pr_created_str:
             return FailedPr(
                 pr_number=pr_number,
                 error_message="No creation timestamp found",
-                api_call_made=False
+                api_call_made=False,
             )
 
         pr_created = parse_datetime_string(pr_created_str, True)
@@ -588,61 +595,69 @@ def process_single_pr(
             timestamps.append(pr_created.isoformat())
 
         # Get timeline events
-        timeline_url = (f'https://api.github.com/repos/'
-                        f'{owner}/{project}/'
-                        f'issues/{pr_number}/timeline')
+        timeline_url = (
+            f"https://api.github.com/repos/"
+            f"{owner}/{project}/"
+            f"issues/{pr_number}/timeline"
+        )
 
         # Make API call with caching
-        api_result = cached_api_call(timeline_url, headers,
-                                     verbosity=verbosity)
+        api_result = cached_api_call(timeline_url, headers, verbosity=verbosity)
 
         if isinstance(api_result, FailedApiCall):
             # For timeline API, we need to return a proper FailedPr
             if api_result.response is not None:
                 # We have a real response object from the failed request
-                return FailedPr.from_response(pr_number, api_result.response,
-                                              api_result.api_call_made)
+                return FailedPr.from_response(
+                    pr_number, api_result.response, api_result.api_call_made
+                )
             else:
                 # Network/request error - create a basic FailedPr
                 return FailedPr(
                     pr_number=pr_number,
-                    error_message=f"Request failed: "
-                                  f"{api_result.error_message}",
-                    api_call_made=api_result.api_call_made
+                    error_message=f"Request failed: " f"{api_result.error_message}",
+                    api_call_made=api_result.api_call_made,
                 )
 
         # Process timeline events for commit-related activity
         timeline_events = api_result.data
         if timeline_events:  # Ensure timeline_events is not None
             for event in timeline_events:
-                if event.get('event') in ['committed', 'pushed', 'head_ref_force_pushed', 'head_ref_restored']:
-                    event_time_str = event.get('created_at')
+                if event.get("event") in [
+                    "committed",
+                    "pushed",
+                    "head_ref_force_pushed",
+                    "head_ref_restored",
+                ]:
+                    event_time_str = event.get("created_at")
                     if event_time_str:
-                        event_time = parse_datetime_string(event_time_str,
-                                                           True)
+                        event_time = parse_datetime_string(event_time_str, True)
                         if is_timestamp_in_range(event_time, start_dt, end_dt):
                             timestamps.append(event_time.isoformat())
 
         # Return successful result
         return ProcessedPr(
             pr_number=pr_number,
-            title=pr_item.get('title', ''),
+            title=pr_item.get("title", ""),
             timestamps=timestamps,
-            api_call_made=api_result.api_call_made
+            api_call_made=api_result.api_call_made,
         )
 
     except requests.RequestException as e:
         return FailedPr(
             pr_number=pr_number,
             error_message=f"Request failed: {e}",
-            api_call_made=False
+            api_call_made=False,
         )
 
 
-def build_pr_search_query(owner: str, project: str,
-                          start_dt: Optional[datetime.datetime],
-                          end_dt: Optional[datetime.datetime],
-                          is_open: bool) -> str:
+def build_pr_search_query(
+    owner: str,
+    project: str,
+    start_dt: Optional[datetime.datetime],
+    end_dt: Optional[datetime.datetime],
+    is_open: bool,
+) -> str:
     """
     Build GitHub search query to find PRs by state and date range.
 
@@ -657,50 +672,59 @@ def build_pr_search_query(owner: str, project: str,
         GitHub search query string
     """
     # Base query components
-    query_parts = [f'repo:{owner}/{project}', 'type:pr']
+    query_parts = [f"repo:{owner}/{project}", "type:pr"]
 
     # Format dates once
-    start_date = start_dt.strftime('%Y-%m-%d') if start_dt else None
-    end_date = end_dt.strftime('%Y-%m-%d') if end_dt else None
+    start_date = start_dt.strftime("%Y-%m-%d") if start_dt else None
+    end_date = end_dt.strftime("%Y-%m-%d") if end_dt else None
 
     # State-specific logic
     if is_open:
-        query_parts.append('is:open')
+        query_parts.append("is:open")
     else:  # closed PRs
         if start_date:
-            query_parts.append(f'closed:>={start_date}')
+            query_parts.append(f"closed:>={start_date}")
         else:
-            query_parts.append('is:closed')
+            query_parts.append("is:closed")
 
     # Common start date filtering (updated constraint)
     if start_date:
-        query_parts.append(f'updated:>={start_date}')
+        query_parts.append(f"updated:>={start_date}")
 
     # Common end date filtering
     if end_date:
-        query_parts.append(f'created:<={end_date}')
+        query_parts.append(f"created:<={end_date}")
 
-    return ' '.join(query_parts)
+    return " ".join(query_parts)
 
 
-def build_open_prs_query(owner: str, project: str,
-                         start_dt: Optional[datetime.datetime],
-                         end_dt: Optional[datetime.datetime]) -> str:
+def build_open_prs_query(
+    owner: str,
+    project: str,
+    start_dt: Optional[datetime.datetime],
+    end_dt: Optional[datetime.datetime],
+) -> str:
     """Build GitHub search query to find open PRs."""
     return build_pr_search_query(owner, project, start_dt, end_dt, True)
 
 
-def build_closed_prs_query(owner: str, project: str,
-                           start_dt: Optional[datetime.datetime],
-                           end_dt: Optional[datetime.datetime]) -> str:
+def build_closed_prs_query(
+    owner: str,
+    project: str,
+    start_dt: Optional[datetime.datetime],
+    end_dt: Optional[datetime.datetime],
+) -> str:
     """Build query to find closed PRs with activity after start_dt."""
     return build_pr_search_query(owner, project, start_dt, end_dt, False)
 
 
-def search_prs_with_query(query: str, headers: dict,
-                          query_type: str = "PRs",
-                          max_results: Optional[int] = None,
-                          verbosity: int = 1) -> list:
+def search_prs_with_query(
+    query: str,
+    headers: dict,
+    query_type: str = "PRs",
+    max_results: Optional[int] = None,
+    verbosity: int = 1,
+) -> list:
     """Execute a single search query and return all paginated results."""
     # Validate max_results is an int >= 0. If 0, exit immediately.
     if max_results is not None:
@@ -709,7 +733,7 @@ def search_prs_with_query(query: str, headers: dict,
         if max_results == 0:
             return []
 
-    search_url = 'https://api.github.com/search/issues'
+    search_url = "https://api.github.com/search/issues"
     all_prs = []
     page = 1
 
@@ -726,27 +750,26 @@ def search_prs_with_query(query: str, headers: dict,
             per_page = min(remaining_results, DEFAULT_PER_PAGE)
 
         params = {
-            'q': query,
-            'page': page,
-            'per_page': per_page,
-            'sort': 'created',
-            'order': 'desc'
+            "q": query,
+            "page": page,
+            "per_page": per_page,
+            "sort": "created",
+            "order": "desc",
         }
 
         # Make API call with caching
-        api_result = cached_api_call(search_url, headers, params,
-                                     verbosity=verbosity)
+        api_result = cached_api_call(search_url, headers, params, verbosity=verbosity)
 
         if isinstance(api_result, FailedApiCall):
             print(f"Error in search API: {api_result.error_message}")
             break
 
         data = api_result.data
-        items = data.get('items', [])
+        items = data.get("items", [])
 
         # Get total count from first response to configure progress bar
         if total_count is None:
-            total_count = data.get('total_count', 0)
+            total_count = data.get("total_count", 0)
             if max_results is not None:
                 total_count = min(total_count, max_results)
             pbar.total = total_count
@@ -781,11 +804,15 @@ def search_prs_with_query(query: str, headers: dict,
     return all_prs
 
 
-def search_filtered_prs(owner: str, project: str, headers: dict,
-                        start_dt: Optional[datetime.datetime],
-                        end_dt: Optional[datetime.datetime],
-                        max_prs: Optional[int] = None,
-                        verbosity: int = 1):
+def search_filtered_prs(
+    owner: str,
+    project: str,
+    headers: dict,
+    start_dt: Optional[datetime.datetime],
+    end_dt: Optional[datetime.datetime],
+    max_prs: Optional[int] = None,
+    verbosity: int = 1,
+):
     """Use search API to get PRs filtered by date range.
 
     Makes two separate queries (open PRs and closed PRs) since GitHub's
@@ -803,9 +830,13 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
     remaining_limit = max_prs
 
     # Execute open PRs query first
-    open_prs = search_prs_with_query(open_query, headers, "open PRs",
-                                     max_results=remaining_limit,
-                                     verbosity=verbosity)
+    open_prs = search_prs_with_query(
+        open_query,
+        headers,
+        "open PRs",
+        max_results=remaining_limit,
+        verbosity=verbosity,
+    )
 
     # Update remaining limit for closed PRs
     if remaining_limit is not None:
@@ -814,9 +845,13 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
     # Execute closed PRs query with remaining limit
     closed_prs = []
     if remaining_limit is None or remaining_limit > 0:
-        closed_prs = search_prs_with_query(closed_query, headers, "closed PRs",
-                                           max_results=remaining_limit,
-                                           verbosity=verbosity)
+        closed_prs = search_prs_with_query(
+            closed_query,
+            headers,
+            "closed PRs",
+            max_results=remaining_limit,
+            verbosity=verbosity,
+        )
 
     print(f"Found {len(open_prs)} open PRs and {len(closed_prs)} closed PRs")
 
@@ -826,7 +861,7 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
     unique_prs = []
 
     for pr in all_prs:
-        pr_number = pr.get('number')
+        pr_number = pr.get("number")
         if pr_number not in seen_pr_numbers:
             seen_pr_numbers.add(pr_number)
             unique_prs.append(pr)
@@ -837,13 +872,16 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
     return unique_prs
 
 
-def query_github_pr_pushes(owner: str, project: str,
-                           start_time: Optional[str] = None,
-                           end_time: Optional[str] = None,
-                           token: Optional[str] = None,
-                           output_file: str = "pr_push_times.json",
-                           max_prs: Optional[int] = None,
-                           verbosity: int = 1):
+def query_github_pr_pushes(
+    owner: str,
+    project: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    token: Optional[str] = None,
+    output_file: str = "pr_push_times.json",
+    max_prs: Optional[int] = None,
+    verbosity: int = 1,
+):
     """
     Query GitHub API for PR creation and commit event timestamps.
 
@@ -865,19 +903,21 @@ def query_github_pr_pushes(owner: str, project: str,
     """
     # Setup headers
     headers = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'USD-Performance-Metrics-Script'
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "USD-Performance-Metrics-Script",
     }
 
     # Add authentication if token provided
     if token:
-        headers['Authorization'] = f'token {token}'
-    elif 'GITHUB_TOKEN' in os.environ:
-        headers['Authorization'] = f'token {os.environ["GITHUB_TOKEN"]}'
+        headers["Authorization"] = f"token {token}"
+    elif "GITHUB_TOKEN" in os.environ:
+        headers["Authorization"] = f'token {os.environ["GITHUB_TOKEN"]}'
     else:
         print("Warning: No GitHub token provided. You may hit rate limits.")
-        print("Consider using --token YOUR_TOKEN or setting GITHUB_TOKEN "
-              "environment variable.")
+        print(
+            "Consider using --token YOUR_TOKEN or setting GITHUB_TOKEN "
+            "environment variable."
+        )
 
     print(f"Fetching PRs for {owner}/{project}...")
 
@@ -891,8 +931,9 @@ def query_github_pr_pushes(owner: str, project: str,
 
     # Use search API to get filtered PRs
     print("Using search API to get PRs within date range...")
-    filtered_prs = search_filtered_prs(owner, project, headers,
-                                       start_dt, end_dt, max_prs, verbosity)
+    filtered_prs = search_filtered_prs(
+        owner, project, headers, start_dt, end_dt, max_prs, verbosity
+    )
 
     if not filtered_prs:
         print("No PRs found matching the search criteria.")
@@ -937,11 +978,13 @@ def query_github_pr_pushes(owner: str, project: str,
             consecutive_errors = 0  # Reset global error count
             processed_count += 1
             pbar.update(1)
-            pbar.set_postfix({
-                'success': len(successful_prs),
-                'failed': len(failed_prs),
-                'retrying': len(active_pr_tasks)
-            })
+            pbar.set_postfix(
+                {
+                    "success": len(successful_prs),
+                    "failed": len(failed_prs),
+                    "retrying": len(active_pr_tasks),
+                }
+            )
 
             # Use base delay for successful requests (already set as default)
 
@@ -953,13 +996,14 @@ def query_github_pr_pushes(owner: str, project: str,
                 failed_prs.append(result)
                 processed_count += 1
                 pbar.update(1)
-                pbar.set_postfix({
-                    'success': len(successful_prs),
-                    'failed': len(failed_prs),
-                    'retrying': len(active_pr_tasks)
-                })
-                msg = (f"\n  ❌ PR #{task.pr_number} "
-                       f"rate limited too many times: ")
+                pbar.set_postfix(
+                    {
+                        "success": len(successful_prs),
+                        "failed": len(failed_prs),
+                        "retrying": len(active_pr_tasks),
+                    }
+                )
+                msg = f"\n  ❌ PR #{task.pr_number} " f"rate limited too many times: "
                 print(msg + f"{result.error_message}")
 
             else:
@@ -973,12 +1017,13 @@ def query_github_pr_pushes(owner: str, project: str,
                         sleep_time = delta.total_seconds()
                 else:
                     # Fallback to exponential backoff if no reset time
-                    sleep_time = BASE_DELAY * (2 ** consecutive_errors)
+                    sleep_time = BASE_DELAY * (2**consecutive_errors)
 
                 # Add back to queue for retry
                 active_pr_tasks.append(task)
-                desc = (f"Processing PRs (rate limited, "
-                        f"retrying PR #{task.pr_number})")
+                desc = (
+                    f"Processing PRs (rate limited, " f"retrying PR #{task.pr_number})"
+                )
                 pbar.set_description(desc)
         else:
             raise TypeError(f"Unknown result type: {type(result)}")
@@ -1005,9 +1050,9 @@ def query_github_pr_pushes(owner: str, project: str,
     all_pr_data = []
     for processed_pr in successful_prs:
         pr_data = {
-            'pr_number': processed_pr.pr_number,
-            'title': processed_pr.title,
-            'timestamps': processed_pr.timestamps
+            "pr_number": processed_pr.pr_number,
+            "title": processed_pr.title,
+            "timestamps": processed_pr.timestamps,
         }
         all_pr_data.append(pr_data)
 
@@ -1022,42 +1067,42 @@ def query_github_pr_pushes(owner: str, project: str,
 
     # Prepare processing statistics
     processing_stats = {
-        'total_prs_found': len(filtered_prs),
-        'successfully_processed': len(successful_prs),
-        'failed_to_process': len(failed_prs),
-        'failed_pr_details': [{
-            'pr_number': failed_pr.pr_number,
-            'error': failed_pr.error_message,
-            'was_rate_limited': failed_pr.is_rate_limited
-        } for failed_pr in failed_prs]
+        "total_prs_found": len(filtered_prs),
+        "successfully_processed": len(successful_prs),
+        "failed_to_process": len(failed_prs),
+        "failed_pr_details": [
+            {
+                "pr_number": failed_pr.pr_number,
+                "error": failed_pr.error_message,
+                "was_rate_limited": failed_pr.is_rate_limited,
+            }
+            for failed_pr in failed_prs
+        ],
     }
 
     # Calculate total timestamp events across all PRs
-    total_timestamp_events = sum(len(pr_data['timestamps'])
-                                 for pr_data in all_pr_data)
+    total_timestamp_events = sum(len(pr_data["timestamps"]) for pr_data in all_pr_data)
 
     print(f"\nFound {len(all_pr_data)} PRs with push data.")
     print(f"Total timestamp events across all PRs: {total_timestamp_events}")
 
     # Save results to JSON file
     output_data = {
-        'repository': f'{owner}/{project}',
-        'query_timestamp': datetime.datetime.now().isoformat(),
-        'filters': {
-            'start_time': start_time,
-            'end_time': end_time
-        },
-        'processing_statistics': processing_stats,
-        'total_prs_processed': len(all_pr_data),
-        'total_timestamp_events': total_timestamp_events,
-        'prs': all_pr_data
+        "repository": f"{owner}/{project}",
+        "query_timestamp": datetime.datetime.now().isoformat(),
+        "filters": {"start_time": start_time, "end_time": end_time},
+        "processing_statistics": processing_stats,
+        "total_prs_processed": len(all_pr_data),
+        "total_timestamp_events": total_timestamp_events,
+        "prs": all_pr_data,
     }
 
-    with open(output_file, 'w', encoding='utf-8') as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
     print(f"Results saved to {output_file}")
     return output_data
+
 
 ###############################################################################
 # CLI
@@ -1071,22 +1116,31 @@ def get_parser():
     )
     parser.add_argument("owner", help="The owner of the github project")
     parser.add_argument("project", help="The name of the github project")
-    parser.add_argument("--start",
-                        help="Optional start time filter "
-                             "(ISO format, e.g., 2023-01-01T00:00:00)")
-    parser.add_argument("--end",
-                        help="Optional end time filter "
-                             "(ISO format, e.g., 2023-12-31T23:59:59)")
-    parser.add_argument("--token",
-                        help="GitHub personal access token "
-                             "(can also use GITHUB_TOKEN env var)")
-    parser.add_argument("--output", default="pr_push_times.json",
-                        help="Output JSON file path")
-    parser.add_argument("--max-prs", type=int,
-                        help="Maximum number of PRs to process (for testing)")
-    parser.add_argument("-v", "--verbose", action="count", default=1,
-                        help="Increase verbosity level "
-                             "(use -v, -vv, -vvv, etc.)")
+    parser.add_argument(
+        "--start",
+        help="Optional start time filter " "(ISO format, e.g., 2023-01-01T00:00:00)",
+    )
+    parser.add_argument(
+        "--end",
+        help="Optional end time filter " "(ISO format, e.g., 2023-12-31T23:59:59)",
+    )
+    parser.add_argument(
+        "--token",
+        help="GitHub personal access token " "(can also use GITHUB_TOKEN env var)",
+    )
+    parser.add_argument(
+        "--output", default="pr_push_times.json", help="Output JSON file path"
+    )
+    parser.add_argument(
+        "--max-prs", type=int, help="Maximum number of PRs to process (for testing)"
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=1,
+        help="Increase verbosity level " "(use -v, -vv, -vvv, etc.)",
+    )
     return parser
 
 
@@ -1104,7 +1158,7 @@ def main(argv=None):
             token=args.token,
             output_file=args.output,
             max_prs=args.max_prs,
-            verbosity=args.verbose
+            verbosity=args.verbose,
         )
     except Exception:  # pylint: disable=broad-except
         traceback.print_exc()
