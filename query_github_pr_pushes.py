@@ -26,6 +26,44 @@ CACHE_VERBOSITY = 2  # Verbosity level required to show cache messages
 TIMING_VERBOSITY = 3  # Verbosity level required to show timing information
 
 ###############################################################################
+# Utility Functions
+###############################################################################
+
+
+def get_current_utc_time() -> datetime.datetime:
+    """
+    Get the current UTC time.
+
+    Returns:
+        Current datetime in UTC timezone
+    """
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _get_header_int(headers, header_name: str) -> Optional[int]:
+    """
+    Safely get a header value and cast to int.
+
+    Args:
+        headers: HTTP response headers
+        header_name: Name of the header to get
+
+    Returns:
+        Integer value if present and valid, None otherwise
+    """
+    header_value = headers.get(header_name)
+    if header_value is None:
+        return None
+
+    try:
+        return int(header_value)
+    except (ValueError, TypeError) as e:
+        print(f"Warning: Invalid {header_name} header: "
+              f"{header_value!r} ({e})")
+        return None
+
+
+###############################################################################
 # Data Structures
 ###############################################################################
 
@@ -47,6 +85,108 @@ class FailedApiCall(ApiCallResult):
     """Result of a failed API call."""
     error_message: str
     response: Optional[object] = None
+
+
+@dataclass
+class PrResult:
+    """Base class for PR processing results."""
+    pr_number: int
+    api_call_made: bool
+
+
+@dataclass
+class ProcessedPr(PrResult):
+    """Result of successfully processing a PR."""
+    title: str
+    timestamps: list
+
+
+@dataclass
+class FailedPr(PrResult):
+    """Result of failed PR processing."""
+    error_message: str
+    rate_limit_reset_time: Optional[datetime.datetime] = None
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """True if this failure was due to rate limiting."""
+        return self.rate_limit_reset_time is not None
+
+    @classmethod
+    def from_response(cls, pr_number: int, response,
+                      api_call_made: bool = True) -> 'FailedPr':
+        """
+        Create a FailedPr from any non-200 HTTP response.
+
+        Args:
+            pr_number: PR number for the FailedPr object
+            response: HTTP response object with headers, status_code, text
+            api_call_made: Whether an API call was made to get this response
+
+        Returns:
+            FailedPr object with appropriate error handling
+        """
+        # Handle rate limiting (403/429) with special reset time parsing
+        if response.status_code in [403, 429]:
+            # Try x-ratelimit-reset first (primary rate limits)
+            reset_ts = _get_header_int(response.headers, 'x-ratelimit-reset')
+            if reset_ts is not None:
+                reset_time = datetime.datetime.fromtimestamp(
+                    reset_ts, tz=datetime.timezone.utc
+                )
+                error_message = (
+                    f"Rate limited (reset at {reset_time.isoformat()}): "
+                    f"{response.status_code} - {response.text}"
+                )
+                return cls(
+                    pr_number=pr_number,
+                    api_call_made=api_call_made,
+                    error_message=error_message,
+                    rate_limit_reset_time=reset_time
+                )
+
+            # Try retry-after (secondary rate limits)
+            retry_seconds = _get_header_int(response.headers, 'retry-after')
+            if retry_seconds is not None:
+                current_time = get_current_utc_time()
+                delta = datetime.timedelta(seconds=retry_seconds)
+                reset_time = current_time + delta
+                error_message = (
+                    f"Rate limited (retry after {retry_seconds}s, "
+                    f"until {reset_time.isoformat()}): "
+                    f"{response.status_code} - {response.text}"
+                )
+                return cls(
+                    pr_number=pr_number,
+                    api_call_made=api_call_made,
+                    error_message=error_message,
+                    rate_limit_reset_time=reset_time
+                )
+
+        # Generic HTTP error (including 403/429 without rate limit headers)
+        error_message = (
+            f"HTTP error {response.status_code}: {response.text}"
+        )
+        return cls(
+            pr_number=pr_number,
+            api_call_made=api_call_made,
+            error_message=error_message
+        )
+
+
+@dataclass
+class PRTask:
+    """Represents a PR processing task with retry information."""
+    pr_item: dict
+    retries_remaining: int = 3
+
+    @property
+    def pr_number(self) -> int:
+        """Get PR number from pr_item, raising RuntimeError if missing."""
+        number = self.pr_item.get('number')
+        if number is None:
+            raise RuntimeError("PR item is missing 'number' field")
+        return number
 
 
 ###############################################################################
@@ -258,16 +398,6 @@ def save_cache(url: str, params: Optional[dict] = None,
         print(f"Warning: Could not save cache file: {e}")
 
 
-def get_current_utc_time() -> datetime.datetime:
-    """
-    Get the current UTC time.
-
-    Returns:
-        Current datetime in UTC timezone
-    """
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
 def sleep_with_timing(sleep_seconds: float, verbosity: int = 1,
                       reason: str = "rate limiting"):
     """
@@ -368,113 +498,6 @@ def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
 
 
 ###############################################################################
-# PR Result Data Structures
-###############################################################################
-
-
-@dataclass
-class PrResult:
-    """Base class for PR processing results."""
-    pr_number: int
-    api_call_made: bool
-
-
-@dataclass
-class ProcessedPr(PrResult):
-    """Result of successfully processing a PR."""
-    title: str
-    timestamps: list
-
-
-@dataclass
-class FailedPr(PrResult):
-    """Result of failed PR processing."""
-    error_message: str
-    rate_limit_reset_time: Optional[datetime.datetime] = None
-
-    @property
-    def is_rate_limited(self) -> bool:
-        """True if this failure was due to rate limiting."""
-        return self.rate_limit_reset_time is not None
-
-    @classmethod
-    def from_response(cls, pr_number: int, response,
-                      api_call_made: bool = True) -> 'FailedPr':
-        """
-        Create a FailedPr from any non-200 HTTP response.
-
-        Args:
-            pr_number: PR number for the FailedPr object
-            response: HTTP response object with headers, status_code, text
-            api_call_made: Whether an API call was made to get this response
-
-        Returns:
-            FailedPr object with appropriate error handling
-        """
-        # Handle rate limiting (403/429) with special reset time parsing
-        if response.status_code in [403, 429]:
-            # Try x-ratelimit-reset first (primary rate limits)
-            reset_ts = _get_header_int(response.headers, 'x-ratelimit-reset')
-            if reset_ts is not None:
-                reset_time = datetime.datetime.fromtimestamp(
-                    reset_ts, tz=datetime.timezone.utc
-                )
-                error_message = (
-                    f"Rate limited (reset at {reset_time.isoformat()}): "
-                    f"{response.status_code} - {response.text}"
-                )
-                return cls(
-                    pr_number=pr_number,
-                    api_call_made=api_call_made,
-                    error_message=error_message,
-                    rate_limit_reset_time=reset_time
-                )
-
-            # Try retry-after (secondary rate limits)
-            retry_seconds = _get_header_int(response.headers, 'retry-after')
-            if retry_seconds is not None:
-                current_time = get_current_utc_time()
-                delta = datetime.timedelta(seconds=retry_seconds)
-                reset_time = current_time + delta
-                error_message = (
-                    f"Rate limited (retry after {retry_seconds}s, "
-                    f"until {reset_time.isoformat()}): "
-                    f"{response.status_code} - {response.text}"
-                )
-                return cls(
-                    pr_number=pr_number,
-                    api_call_made=api_call_made,
-                    error_message=error_message,
-                    rate_limit_reset_time=reset_time
-                )
-
-        # Generic HTTP error (including 403/429 without rate limit headers)
-        error_message = (
-            f"HTTP error {response.status_code}: {response.text}"
-        )
-        return cls(
-            pr_number=pr_number,
-            api_call_made=api_call_made,
-            error_message=error_message
-        )
-
-
-@dataclass
-class PRTask:
-    """Represents a PR processing task with retry information."""
-    pr_item: dict
-    retries_remaining: int = 3
-
-    @property
-    def pr_number(self) -> int:
-        """Get PR number from pr_item, raising RuntimeError if missing."""
-        number = self.pr_item.get('number')
-        if number is None:
-            raise RuntimeError("PR item is missing 'number' field")
-        return number
-
-
-###############################################################################
 # Core functions
 ###############################################################################
 
@@ -522,29 +545,6 @@ def is_timestamp_in_range(timestamp: datetime.datetime,
     """
     return ((start_dt is None or timestamp >= start_dt) and
             (end_dt is None or timestamp <= end_dt))
-
-
-def _get_header_int(headers, header_name: str) -> Optional[int]:
-    """
-    Safely get a header value and cast to int.
-
-    Args:
-        headers: HTTP response headers
-        header_name: Name of the header to get
-
-    Returns:
-        Integer value if present and valid, None otherwise
-    """
-    header_value = headers.get(header_name)
-    if header_value is None:
-        return None
-
-    try:
-        return int(header_value)
-    except (ValueError, TypeError) as e:
-        print(f"Warning: Invalid {header_name} header: "
-              f"{header_value!r} ({e})")
-        return None
 
 
 def process_single_pr(
