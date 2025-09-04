@@ -135,7 +135,8 @@ def ensure_cache_dir() -> Path:
 
 
 def load_cache(url: str, params: Optional[dict] = None,
-               max_age_hours: int = 24) -> Optional[dict]:
+               max_age_hours: int = 24,
+               verbose: bool = False) -> Optional[dict]:
     """
     Load cached API response if it exists and is recent enough.
 
@@ -143,6 +144,7 @@ def load_cache(url: str, params: Optional[dict] = None,
         url: The API URL
         params: Optional query parameters
         max_age_hours: Maximum age of cache in hours (default 24)
+        verbose: Whether to print cache-related information (default False)
 
     Returns:
         Cached response data if found and valid, None otherwise
@@ -174,14 +176,16 @@ def load_cache(url: str, params: Optional[dict] = None,
             cache_file.stat().st_mtime)
         cache_age = datetime.datetime.now() - file_mtime
         if cache_age.total_seconds() > max_age_hours * 3600:
-            print(f"Cache file {cache_file.name} is too old "
-                  f"({cache_age}), ignoring")
+            if verbose:
+                print(f"Cache file {cache_file.name} is too old "
+                      f"({cache_age}), ignoring")
             return None
 
         # Load and return cached data
         with open(cache_file, 'r', encoding='utf-8') as f:
             cached_data = json.load(f)
-            print(f"Using cached response from {cache_file.name}")
+            if verbose:
+                print(f"Using cached response from {cache_file.name}")
             return cached_data
 
     except (json.JSONDecodeError, OSError) as e:
@@ -190,7 +194,8 @@ def load_cache(url: str, params: Optional[dict] = None,
 
 
 def save_cache(url: str, params: Optional[dict] = None,
-               response_data: Optional[dict] = None) -> None:
+               response_data: Optional[dict] = None,
+               verbose: bool = False) -> None:
     """
     Save API response to cache.
 
@@ -198,6 +203,7 @@ def save_cache(url: str, params: Optional[dict] = None,
         url: The API URL
         params: Optional query parameters
         response_data: The response data to cache
+        verbose: Whether to print cache-related information (default False)
     """
     if response_data is None:
         return
@@ -218,6 +224,9 @@ def save_cache(url: str, params: Optional[dict] = None,
 
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump(cache_data, f, indent=2)
+
+        if verbose:
+            print(f"Saved response to cache: {filename}")
 
     except OSError as e:
         print(f"Warning: Could not save cache file: {e}")
@@ -397,7 +406,8 @@ def process_single_pr(
         task: PRTask, headers: dict,
         owner: str, project: str,
         start_dt: Optional[datetime.datetime],
-        end_dt: Optional[datetime.datetime]
+        end_dt: Optional[datetime.datetime],
+        verbose: bool = False
 ) -> Union[ProcessedPr, FailedPr]:
     """Process a single PR to extract timeline data.
 
@@ -437,7 +447,7 @@ def process_single_pr(
                         f'issues/{pr_number}/timeline')
 
         # Check cache first
-        cached_data = load_cache(timeline_url)
+        cached_data = load_cache(timeline_url, verbose=verbose)
         if cached_data:
             timeline_events = cached_data['response_data']
         else:
@@ -449,7 +459,7 @@ def process_single_pr(
 
             timeline_events = response.json()
             # Save successful response to cache
-            save_cache(timeline_url, None, timeline_events)
+            save_cache(timeline_url, None, timeline_events, verbose=verbose)
 
         # Process timeline events for commit-related activity
         for event in timeline_events:
@@ -534,7 +544,8 @@ def build_closed_prs_query(owner: str, project: str,
 
 def search_prs_with_query(query: str, headers: dict,
                           query_type: str = "PRs",
-                          max_results: Optional[int] = None) -> list:
+                          max_results: Optional[int] = None,
+                          verbose: bool = False) -> list:
     """Execute a single search query and return all paginated results."""
     # Validate max_results is an int >= 0. If 0, exit immediately.
     if max_results is not None:
@@ -568,7 +579,7 @@ def search_prs_with_query(query: str, headers: dict,
         }
 
         # Check cache first
-        cached_data = load_cache(search_url, params)
+        cached_data = load_cache(search_url, params, verbose=verbose)
         if cached_data:
             data = cached_data['response_data']
         else:
@@ -581,7 +592,7 @@ def search_prs_with_query(query: str, headers: dict,
 
             data = response.json()
             # Save successful response to cache
-            save_cache(search_url, params, data)
+            save_cache(search_url, params, data, verbose=verbose)
         items = data.get('items', [])
 
         # Get total count from first response to configure progress bar
@@ -624,7 +635,8 @@ def search_prs_with_query(query: str, headers: dict,
 def search_filtered_prs(owner: str, project: str, headers: dict,
                         start_dt: Optional[datetime.datetime],
                         end_dt: Optional[datetime.datetime],
-                        max_prs: Optional[int] = None):
+                        max_prs: Optional[int] = None,
+                        verbose: bool = False):
     """Use search API to get PRs filtered by date range.
 
     Makes two separate queries (open PRs and closed PRs) since GitHub's
@@ -643,7 +655,8 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
 
     # Execute open PRs query first
     open_prs = search_prs_with_query(open_query, headers, "open PRs",
-                                     max_results=remaining_limit)
+                                     max_results=remaining_limit,
+                                     verbose=verbose)
 
     # Update remaining limit for closed PRs
     if remaining_limit is not None:
@@ -653,7 +666,8 @@ def search_filtered_prs(owner: str, project: str, headers: dict,
     closed_prs = []
     if remaining_limit is None or remaining_limit > 0:
         closed_prs = search_prs_with_query(closed_query, headers, "closed PRs",
-                                           max_results=remaining_limit)
+                                           max_results=remaining_limit,
+                                           verbose=verbose)
 
     print(f"Found {len(open_prs)} open PRs and {len(closed_prs)} closed PRs")
 
@@ -679,7 +693,8 @@ def query_github_pr_pushes(owner: str, project: str,
                            end_time: Optional[str] = None,
                            token: Optional[str] = None,
                            output_file: str = "pr_push_times.json",
-                           max_prs: Optional[int] = None):
+                           max_prs: Optional[int] = None,
+                           verbose: bool = False):
     """
     Query GitHub API for PR creation and commit event timestamps.
 
@@ -697,6 +712,7 @@ def query_github_pr_pushes(owner: str, project: str,
         token: GitHub personal access token
         output_file: Output JSON file path
         max_prs: Optional maximum number of PRs to process (for testing)
+        verbose: Show verbose cache information and debug output
     """
     # Setup headers
     headers = {
@@ -727,7 +743,7 @@ def query_github_pr_pushes(owner: str, project: str,
     # Use search API to get filtered PRs
     print("Using search API to get PRs within date range...")
     filtered_prs = search_filtered_prs(owner, project, headers,
-                                       start_dt, end_dt, max_prs)
+                                       start_dt, end_dt, max_prs, verbose)
 
     if not filtered_prs:
         print("No PRs found matching the search criteria.")
@@ -761,7 +777,7 @@ def query_github_pr_pushes(owner: str, project: str,
 
         # Process the PR and get result
         result = process_single_pr(
-            task, headers, owner, project, start_dt, end_dt
+            task, headers, owner, project, start_dt, end_dt, verbose
         )
 
         # Initialize sleep time for this iteration
@@ -921,6 +937,8 @@ def get_parser():
                         help="Output JSON file path")
     parser.add_argument("--max-prs", type=int,
                         help="Maximum number of PRs to process (for testing)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show verbose cache information and debug output")
     return parser
 
 
@@ -937,7 +955,8 @@ def main(argv=None):
             end_time=args.end,
             token=args.token,
             output_file=args.output,
-            max_prs=args.max_prs
+            max_prs=args.max_prs,
+            verbose=args.verbose
         )
     except Exception:  # pylint: disable=broad-except
         traceback.print_exc()
