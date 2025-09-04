@@ -629,6 +629,8 @@ def process_single_pr(
                     "pushed",
                     "head_ref_force_pushed",
                     "head_ref_restored",
+                    "merged",
+                    "reopened",
                 ]:
                     event_time_str = event.get("created_at")
                     if event_time_str:
