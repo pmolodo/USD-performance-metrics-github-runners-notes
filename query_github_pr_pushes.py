@@ -23,6 +23,7 @@ DEFAULT_PER_PAGE = 100
 BASE_DELAY = 0.5  # seconds
 MAX_EXPONENTIAL_DELAY = 300  # seconds
 CACHE_VERBOSITY = 2  # Verbosity level required to show cache messages
+TIMING_VERBOSITY = 3  # Verbosity level required to show timing information
 
 ###############################################################################
 # Cache management functions
@@ -241,6 +242,36 @@ def get_current_utc_time() -> datetime.datetime:
         Current datetime in UTC timezone
     """
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+def sleep_with_timing(sleep_seconds: float, verbosity: int = 1,
+                      reason: str = "rate limiting"):
+    """
+    Sleep for the specified duration with optional timing information.
+
+    Args:
+        sleep_seconds: Number of seconds to sleep
+        verbosity: Verbosity level for output
+        reason: Reason for the sleep (for logging purposes)
+    """
+    # One-line message if verbosity >= TIMING_VERBOSITY
+    if verbosity >= TIMING_VERBOSITY:
+        print(f"   Sleeping for {sleep_seconds:.2f}s ({reason})")
+
+    # Detailed timing info if sleep > 2 seconds (always, regardless of
+    # verbosity)
+    if sleep_seconds > 2:
+        current_time = get_current_utc_time()
+        start_time_str = current_time.strftime('%H:%M:%S UTC')
+        print(f"   Wait started: {start_time_str}")
+        sleep_delta = datetime.timedelta(seconds=sleep_seconds)
+        print(f"   Wait duration: {sleep_delta}")
+        wake_time = current_time + sleep_delta
+        wake_time_str = wake_time.strftime('%H:%M:%S UTC')
+        print(f"   Target wake time: {wake_time_str}")
+        print("   Press Ctrl-C to abort if needed")
+
+    time.sleep(sleep_seconds)
 
 
 def cached_api_call(url: str, headers: dict, params: Optional[dict] = None,
@@ -898,18 +929,15 @@ def query_github_pr_pushes(owner: str, project: str,
         if active_pr_tasks:
             sleep_time = max(sleep_time, BASE_DELAY)
 
-            if sleep_time > 2:
-                # Show detailed timing information
-                current_time = get_current_utc_time()
-                start_time_str = current_time.strftime('%H:%M:%S UTC')
-                print(f"   Wait started: {start_time_str}")
-                sleep_delta = datetime.timedelta(seconds=sleep_time)
-                print(f"   Wait duration: {sleep_delta}")
-                wake_time = current_time + sleep_delta
-                wake_time_str = wake_time.strftime('%H:%M:%S UTC')
-                print(f"   Target wake time: {wake_time_str}")
-                print("   Press Ctrl-C to abort if needed")
-            time.sleep(sleep_time)
+            # Determine reason for sleep based on context
+            if isinstance(result, FailedPr) and result.is_rate_limited:
+                reason = "rate limit reset"
+            elif isinstance(result, FailedPr):
+                reason = "exponential backoff"
+            else:
+                reason = "rate limiting prevention"
+
+            sleep_with_timing(sleep_time, verbosity, reason)
 
     # Close progress bar
     pbar.close()
