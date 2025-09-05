@@ -155,6 +155,9 @@ def get_repo_events(
         else:
             current = current.replace(month=current.month + 1)
 
+    # Reverse the list to process months from newest to oldest
+    months_to_process.reverse()
+
     print(
         f"Planning to download {len(months_to_process)} months of data for"
         f" {repo_owner}/{repo_name}"
