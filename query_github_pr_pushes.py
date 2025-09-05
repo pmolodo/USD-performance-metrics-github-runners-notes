@@ -259,9 +259,8 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
         else:
             repo_info = ""
     else:
-        # Generic API call
-        api_type = "api-call"
-        repo_info = ""
+        # Unknown API call - we should handle all specific API types
+        raise ValueError(f"Unknown API URL format for caching: {url}")
 
     # Sort params once for both human-readable format and hash
     sorted_params = None
