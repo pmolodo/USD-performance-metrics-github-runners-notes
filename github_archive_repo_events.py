@@ -23,7 +23,6 @@ Set up Application Default Credentials with: gcloud auth application-default log
 
 import argparse
 import datetime
-import glob
 import inspect
 import json
 import os
@@ -39,6 +38,14 @@ from google.cloud import bigquery
 
 THIS_FILE = os.path.abspath(inspect.getsourcefile(lambda: None) or __file__)
 THIS_DIR = os.path.dirname(THIS_FILE)
+
+# Import bigquery_utils with fallback to add THIS_DIR to sys.path
+try:
+    import bigquery_utils
+except ImportError:
+    # Add THIS_DIR to sys.path and try again
+    sys.path.insert(0, THIS_DIR)
+    import bigquery_utils
 
 DEFAULT_OUTPUT_DIR = os.path.join(THIS_DIR, ".cache", "github_archive_data")
 
@@ -336,50 +343,10 @@ def get_parser():
         help="Directory to save downloaded files",
     )
 
-    parser.add_argument(
-        "--credentials-file",
-        type=str,
-        default=".credentials/*.json",
-        help=(
-            "Glob pattern for Google Cloud credentials file (default:"
-            " '.credentials/*.json')"
-        ),
-    )
+    # Add BigQuery-related arguments
+    bigquery_utils.add_bigquery_args(parser)
 
     return parser
-
-
-def setup_credentials(credentials_pattern: str) -> None:
-    """
-    Set up Google Cloud credentials using a glob pattern.
-
-    Args:
-        credentials_pattern: Glob pattern to match credential files
-
-    Raises:
-        ValueError: If multiple credential files match the pattern
-    """
-    matches = glob.glob(credentials_pattern)
-
-    if len(matches) == 0:
-        # No matches, do nothing (use default credentials)
-        print(f"No credential files found matching pattern: {credentials_pattern}")
-        print("Using default Google Cloud credentials")
-        return
-    elif len(matches) == 1:
-        # Exactly one match, set environment variable
-        credentials_file = os.path.abspath(matches[0])
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_file
-        print(f"Using credentials file: {credentials_file}")
-        return
-    else:
-        # Multiple matches, error
-        raise ValueError(
-            "Multiple credential files found matching pattern"
-            f" '{credentials_pattern}':\n"
-            + "\n".join(f"  - {match}" for match in sorted(matches))
-            + "\nPlease specify a more exact glob pattern or filename."
-        )
 
 
 def parse_month_string(month_str: str) -> datetime.datetime:
@@ -412,7 +379,7 @@ def main(argv=None):
 
     try:
         # Set up Google Cloud credentials
-        setup_credentials(args.credentials_file)
+        bigquery_utils.setup_credentials(args.credentials_file)
 
         # Parse date arguments
         start_month = None
