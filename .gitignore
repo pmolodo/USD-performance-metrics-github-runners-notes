@@ -5,6 +5,9 @@
 # output from github_archive_repo_events.py, and API call caches
 .cache/
 
+# store service account credentials (DON'T CHECK IN!!)
+./credentials/
+
 # python byte-compiled / optimized files
 __pycache__/
 *.py[co]
