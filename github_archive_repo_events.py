@@ -49,9 +49,31 @@ except ImportError:
 
 DEFAULT_OUTPUT_DIR = os.path.join(THIS_DIR, ".cache", "github_archive_data")
 
+# Global BigQuery client cache
+_bigquery_client = None
+
 ###############################################################################
 # Core functions
 ###############################################################################
+
+
+def get_bigquery_client(credentials_file_pattern=None):
+    """
+    Get a BigQuery client, initializing credentials only on first use.
+
+    Args:
+        credentials_file_pattern: Optional credentials file pattern to use
+
+    Returns:
+        bigquery.Client: Initialized BigQuery client
+    """
+    global _bigquery_client
+
+    if _bigquery_client is None:
+        bigquery_utils.setup_credentials(credentials_file_pattern)
+        _bigquery_client = bigquery.Client()
+
+    return _bigquery_client
 
 
 def decode_json_fields(event_dict):
@@ -80,17 +102,18 @@ def decode_json_fields(event_dict):
     return changes_made
 
 
-def check_query_bytes_processed(query_sql):
+def check_query_bytes_processed(query_sql, credentials_file_pattern=None):
     """
     Estimate query bytes processed without running it (dry run).
 
     Args:
         query_sql: The SQL query to estimate
+        credentials_file_pattern: Optional credentials file pattern to use
 
     Returns:
         Number of bytes that would be processed
     """
-    client = bigquery.Client()
+    client = get_bigquery_client(credentials_file_pattern)
     job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
 
     # This will estimate bytes without running the query
@@ -151,6 +174,7 @@ def get_repo_events(
     end_month: datetime.datetime | None = None,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     fix_existing_files: bool = False,
+    credentials_file_pattern: str | None = None,
 ):
     """
     Download repository events from GitHub Archive for the given date range.
@@ -168,8 +192,6 @@ def get_repo_events(
             they were downloaded or already existed); note that the size may be less
             than the number of months if the user cancelled or there were errors.
     """
-
-    client = bigquery.Client()
 
     # Set default dates if not provided
     now = datetime.datetime.now()
@@ -236,7 +258,9 @@ def get_repo_events(
             # File doesn't exist, need to query for it
             query = get_repo_events_month_query(repo_owner, repo_name, year, month)
             try:
-                bytes_processed = check_query_bytes_processed(query)
+                bytes_processed = check_query_bytes_processed(
+                    query, credentials_file_pattern
+                )
                 queries.append((year, month, query, bytes_processed, filepath))
                 total_bytes += bytes_processed
                 print(
@@ -308,6 +332,9 @@ def get_repo_events(
         print("Starting downloads...")
         for i, (year, month, query, estimated_bytes, filepath) in enumerate(queries, 1):
             print(f"[{i}/{len(queries)}] Downloading {year}-{month:02d}...")
+
+            # Only create BigQuery client when we actually need to download data
+            client = get_bigquery_client(credentials_file_pattern)
 
             # Execute query
             query_job = client.query(query)
@@ -490,9 +517,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
-        # Set up Google Cloud credentials
-        bigquery_utils.setup_credentials(args.credentials_file)
-
         # Parse date arguments
         start_month = None
         end_month = None
@@ -516,6 +540,7 @@ def main(argv=None):
             end_month=end_month,
             output_dir=args.output_dir,
             fix_existing_files=args.fix_existing_files,
+            credentials_file_pattern=args.credentials_file,
         )
 
         return 0
