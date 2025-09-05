@@ -170,7 +170,9 @@ def get_repo_events(
     existing_files = []
     total_bytes = 0
 
-    print("Checking for existing files and estimating costs for missing ones...")
+    print(
+        "Checking for existing files and estimating bytes scanned for missing ones..."
+    )
     for year, month in months_to_process:
         # Create filename to check if it already exists
         filename = f"{repo_owner}_{repo_name}_{year}_{month:02d}.json"
@@ -191,7 +193,7 @@ def get_repo_events(
                     f" ({bytes_processed/1024**3:.3f} GB)"
                 )
             except Exception as e:
-                print(f"  {year}-{month:02d}: Error estimating cost - {e}")
+                print(f"  {year}-{month:02d}: Error estimating bytes scanned - {e}")
                 raise
 
     total_gb = total_bytes / (1024**3)
@@ -209,7 +211,7 @@ def get_repo_events(
         return existing_files
 
     print()
-    print("Total estimated cost for new downloads:")
+    print("Total estimated bytes scanned for new downloads:")
     print(f"  {total_bytes:,} bytes")
     print(f"  {total_gb:.3f} GB")
     print(f"  {total_tb:.6f} TB")
