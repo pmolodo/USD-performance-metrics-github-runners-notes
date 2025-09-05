@@ -593,6 +593,53 @@ def fetch_repository_events(
     return all_events
 
 
+def get_repository_push_events(
+    owner: str,
+    project: str,
+    headers: dict,
+    verbosity: int = 1,
+) -> dict:
+    """
+    Fetch repository events and extract PushEvents organized by ref.
+
+    Args:
+        owner: Repository owner
+        project: Repository name
+        headers: HTTP headers for API requests
+        verbosity: Verbosity level for output
+
+    Returns:
+        Dictionary mapping git refs to lists of PushEvent objects
+    """
+    # Fetch repository events first
+    repository_events = fetch_repository_events(owner, project, headers, verbosity)
+
+    # Process repository events to extract PushEvents organized by ref
+    push_events_by_ref = {}
+    push_event_count = 0
+
+    for event in repository_events:
+        if event.get("type") == "PushEvent":
+            push_event_count += 1
+            payload = event.get("payload", {})
+            ref = payload.get("ref")
+
+            if ref:
+                if ref not in push_events_by_ref:
+                    push_events_by_ref[ref] = []
+                push_events_by_ref[ref].append(event)
+
+    if verbosity >= 1:
+        print(
+            f"Found {push_event_count} PushEvents across {len(push_events_by_ref)} refs"
+        )
+        if verbosity >= 2:
+            for ref, events in push_events_by_ref.items():
+                print(f"  {ref}: {len(events)} push events")
+
+    return push_events_by_ref
+
+
 def parse_datetime_string(
     dt_string: str, is_github_api_format: bool = False
 ) -> datetime.datetime:
@@ -1043,10 +1090,8 @@ def query_github_pr_pushes(
 
     print(f"Fetching PRs for {owner}/{project}...")
 
-    # Fetch repository events first (for future push event analysis)
-    repository_events = fetch_repository_events(owner, project, headers, verbosity)
-    # Note: repository_events data is stored but not processed yet per user instructions
-    _ = repository_events  # Acknowledge the variable is intentionally unused for now
+    # Fetch and process repository events to extract PushEvents organized by ref
+    get_repository_push_events(owner, project, headers, verbosity)
 
     # Process time filters once outside the loop
     start_dt = None
