@@ -709,9 +709,9 @@ def is_timestamp_in_range(
 
 def get_event_time_str(event: dict) -> str:
     """Get the time string from a timeline event."""
-    time = event.get("created_at")
-    if time is not None:
-        return time
+    event_time = event.get("created_at")
+    if event_time is not None:
+        return event_time
 
     raise ValueError(f"No time string found for event: {event}")
 
