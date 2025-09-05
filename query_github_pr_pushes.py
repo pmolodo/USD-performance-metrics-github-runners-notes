@@ -881,7 +881,7 @@ def build_pr_search_query(
     is_open: bool,
 ) -> str:
     """
-    Build GitHub search query to find PRs by state and date range.
+    Build GitHub search query to find PRs by state and time range.
 
     Args:
         owner: Repository owner
@@ -1035,7 +1035,7 @@ def search_filtered_prs(
     max_prs: int | None = None,
     verbosity: int = 1,
 ):
-    """Use search API to get PRs filtered by date range.
+    """Use search API to get PRs filtered by time range.
 
     Makes two separate queries (open PRs and closed PRs) since GitHub's
     issue search API doesn't support OR operators with parentheses.
@@ -1155,7 +1155,7 @@ def query_github_pr_pushes(
         end_dt = parse_datetime_string(end_time)
 
     # Use search API to get filtered PRs
-    print("Using search API to get PRs within date range...")
+    print("Using search API to get PRs within time range...")
     filtered_prs = search_filtered_prs(
         owner, project, headers, start_dt, end_dt, max_prs, verbosity
     )
