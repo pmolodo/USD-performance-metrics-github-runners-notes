@@ -54,6 +54,32 @@ DEFAULT_OUTPUT_DIR = os.path.join(THIS_DIR, ".cache", "github_archive_data")
 ###############################################################################
 
 
+def decode_json_fields(event_dict):
+    """
+    Decode JSON string fields (payload and other) in an event dictionary.
+
+    Args:
+        event_dict: Dictionary representing a GitHub Archive event
+
+    Returns:
+        bool: True if any changes were made, False otherwise
+
+    Note:
+        Modifies the input dictionary in place.
+        Prints warnings for any JSON decoding errors but preserves original values.
+    """
+    changes_made = False
+    for field_name in ["payload", "other"]:
+        if field_name in event_dict and isinstance(event_dict[field_name], str):
+            try:
+                event_dict[field_name] = json.loads(event_dict[field_name])
+                changes_made = True
+            except (json.JSONDecodeError, TypeError) as e:
+                print(f"Warning: Failed to parse {field_name} as JSON for event: {e}")
+                # Keep the original string value
+    return changes_made
+
+
 def check_query_bytes_processed(query_sql):
     """
     Estimate query bytes processed without running it (dry run).
@@ -124,6 +150,7 @@ def get_repo_events(
     start_month: datetime.datetime | None = None,
     end_month: datetime.datetime | None = None,
     output_dir: str = DEFAULT_OUTPUT_DIR,
+    fix_existing_files: bool = False,
 ):
     """
     Download repository events from GitHub Archive for the given date range.
@@ -134,10 +161,14 @@ def get_repo_events(
         start_month: Start month (defaults to current month if None)
         end_month: End month (defaults to current month if None)
         output_dir: Directory to save downloaded files
+        fix_existing_files: If True, also fix JSON parsing in existing files
 
     Returns:
-        list: List of file paths that were downloaded
+        list: List of on-disk file paths for all the months in the range (whether
+            they were downloaded or already existed); note that the size may be less
+            than the number of months if the user cancelled or there were errors.
     """
+
     client = bigquery.Client()
 
     # Set default dates if not provided
@@ -163,13 +194,22 @@ def get_repo_events(
         else:
             current = current.replace(month=current.month + 1)
 
+    if not months_to_process:
+        raise ValueError("No months to process")
+
     # Reverse the list to process months from newest to oldest
     months_to_process.reverse()
 
-    print(
-        f"Planning to download {len(months_to_process)} months of data for"
-        f" {repo_owner}/{repo_name}"
-    )
+    if fix_existing_files:
+        print(
+            f"Planning to process {len(months_to_process)} months of files for"
+            f" {repo_owner}/{repo_name} (download new + fix existing)"
+        )
+    else:
+        print(
+            f"Planning to download {len(months_to_process)} months of data for"
+            f" {repo_owner}/{repo_name}"
+        )
     print(
         f"Date range: {start_month.strftime('%Y-%m')} to {end_month.strftime('%Y-%m')}"
     )
@@ -210,6 +250,13 @@ def get_repo_events(
     total_gb = total_bytes / (1024**3)
     total_tb = total_gb / 1024
 
+    if len(queries) + len(existing_files) != len(months_to_process):
+        raise AssertionError(
+            f"Number of queries ({len(queries)}) + number of existing files"
+            f" ({len(existing_files)}) != number of months to process"
+            f" ({len(months_to_process)})"
+        )
+
     # Summary of what needs to be done
     print()
     print("Summary:")
@@ -217,94 +264,137 @@ def get_repo_events(
     print(f"  Files already exist: {len(existing_files)}")
     print(f"  Files to download: {len(queries)}")
 
-    if len(queries) == 0:
+    if len(queries) == 0 and not fix_existing_files:
         print("\n✅ All requested files already exist! No downloads needed.")
         return existing_files
 
-    print()
-    print("Total estimated bytes scanned for new downloads:")
-    print(f"  {total_bytes:,} bytes")
-    print(f"  {total_gb:.3f} GB")
-    print(f"  {total_tb:.6f} TB")
-    print()
-
-    if total_tb > 0.1:  # Warn if more than 0.1 TB (100 GB)
-        print(f"⚠️  WARNING: This will use {total_tb:.3f} TB of your BigQuery quota!")
-        print("Consider using a smaller date range or enabling billing.")
+    if len(queries) > 0:
+        print()
+        print("Total estimated bytes scanned for new downloads:")
+        print(f"  {total_bytes:,} bytes")
+        print(f"  {total_gb:.3f} GB")
+        print(f"  {total_tb:.6f} TB")
         print()
 
+        if total_tb > 0.1:  # Warn if more than 0.1 TB (100 GB)
+            print(
+                f"⚠️  WARNING: This will use {total_tb:.3f} TB of your BigQuery quota!"
+            )
+            print("Consider using a smaller date range or enabling billing.")
+            print()
+
     # Ask for confirmation
-    response = input(f"Proceed with downloading {len(queries)} new files? (y/N): ")
+    if fix_existing_files and len(existing_files) > 0:
+        action_desc = (
+            f"downloading {len(queries)} new files and fixing"
+            f" {len(existing_files)} existing files"
+        )
+    else:
+        action_desc = f"downloading {len(queries)} new files"
+
+    response = input(f"Proceed with {action_desc}? (y/N): ")
     if response.lower() != "y":
-        print("Download cancelled.")
+        print("Operation cancelled.")
         print(f"Returning {len(existing_files)} existing files.")
         return existing_files
 
-    # Run queries and save to disk
+    # Process files
     downloaded_files = []
+    fixed_files = []
 
-    print()
-    print("Starting downloads...")
-    for i, (year, month, query, estimated_bytes, filepath) in enumerate(queries, 1):
-        print(f"[{i}/{len(queries)}] Downloading {year}-{month:02d}...")
+    # Download new files
+    if len(queries) > 0:
+        print()
+        print("Starting downloads...")
+        for i, (year, month, query, estimated_bytes, filepath) in enumerate(queries, 1):
+            print(f"[{i}/{len(queries)}] Downloading {year}-{month:02d}...")
 
-        # Execute query
-        query_job = client.query(query)
-        results = query_job.result()
+            # Execute query
+            query_job = client.query(query)
+            results = query_job.result()
 
-        # Convert to list of dictionaries
-        events = []
-        for row in results:
-            # Convert row to dictionary (all columns from GitHub Archive)
-            event_dict = dict(row)
-            # Convert datetime objects to strings for JSON serialization
-            for key, value in event_dict.items():
-                if isinstance(value, datetime.datetime):
-                    event_dict[key] = value.isoformat()
+            # Convert to list of dictionaries
+            events = []
+            for row in results:
+                # Convert row to dictionary (all columns from GitHub Archive)
+                event_dict = dict(row)
+                # Convert datetime objects to strings for JSON serialization
+                for key, value in event_dict.items():
+                    if isinstance(value, datetime.datetime):
+                        event_dict[key] = value.isoformat()
 
-            # Parse JSON fields (payload and other)
-            for field_name in ["payload", "other"]:
-                if field_name in event_dict and isinstance(event_dict[field_name], str):
-                    try:
-                        event_dict[field_name] = json.loads(event_dict[field_name])
-                    except (json.JSONDecodeError, TypeError) as e:
-                        print(
-                            f"Warning: Failed to parse {field_name} as JSON for"
-                            f" event: {e}"
-                        )
-                        # Keep the original string value
+                # Parse JSON fields (payload and other)
+                decode_json_fields(event_dict)
 
-            events.append(event_dict)
+                events.append(event_dict)
 
-        # Save to file (filepath is already computed)
+            # Save to file (filepath is already computed)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "repo_owner": repo_owner,
+                        "repo_name": repo_name,
+                        "year": year,
+                        "month": month,
+                        "download_time": datetime.datetime.now().isoformat(),
+                        "event_count": len(events),
+                        "estimated_bytes_processed": estimated_bytes,
+                        "actual_bytes_processed": query_job.total_bytes_processed,
+                        "events": events,
+                    },
+                    f,
+                    indent=2,
+                )
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "repo_owner": repo_owner,
-                    "repo_name": repo_name,
-                    "year": year,
-                    "month": month,
-                    "download_time": datetime.datetime.now().isoformat(),
-                    "event_count": len(events),
-                    "estimated_bytes_processed": estimated_bytes,
-                    "actual_bytes_processed": query_job.total_bytes_processed,
-                    "events": events,
-                },
-                f,
-                indent=2,
-            )
+            downloaded_files.append(filepath)
+            print(f"  Saved {len(events)} events to {filepath}")
 
-        downloaded_files.append(filepath)
-        print(f"  Saved {len(events)} events to {filepath}")
+    # Fix existing files if requested
+    if fix_existing_files and len(existing_files) > 0:
+        print()
+        print("Fixing existing files...")
+        for i, filepath in enumerate(existing_files, 1):
+            filename = os.path.basename(filepath)
+            print(f"[{i}/{len(existing_files)}] Processing {filename}...")
 
-    # Combine existing and newly downloaded files
+            try:
+                # Load existing file
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if "events" not in data:
+                    print(f"    Warning: No 'events' field found in {filename}")
+                    continue
+
+                # Track if any changes were made to the file
+                file_changed = False
+
+                # Process each event
+                for event in data["events"]:
+                    if decode_json_fields(event):
+                        file_changed = True
+
+                if file_changed:
+                    # Save the updated file
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+                    print(f"    ✅ Fixed JSON fields in {filename}")
+                    fixed_files.append(filepath)
+                else:
+                    print(f"    ✓ No fixes needed for {filename}")
+
+            except Exception as e:  # pylint: disable=broad-except
+                print(f"    ❌ Error processing {filename}: {e}")
+                continue
+
     all_files = existing_files + downloaded_files
 
     print()
     print("Process complete!")
-    print(f"  Existing files: {len(existing_files)}")
     print(f"  Downloaded files: {len(downloaded_files)}")
+    print(f"  Existing files: {len(existing_files)}")
+    if fix_existing_files:
+        print(f"  Files fixed: {len(fixed_files)}")
     print(f"  Total files: {len(all_files)}")
     print(f"  Output directory: {output_dir}")
 
@@ -354,6 +444,15 @@ def get_parser():
         type=str,
         default=DEFAULT_OUTPUT_DIR,
         help="Directory to save downloaded files",
+    )
+
+    parser.add_argument(
+        "--fix-existing-files",
+        action="store_true",
+        help=(
+            "Fix JSON parsing in existing downloaded files (decode payload/other"
+            " fields)"
+        ),
     )
 
     # Add BigQuery-related arguments
@@ -409,21 +508,17 @@ def main(argv=None):
             print("Error: start_month must be <= end_month")
             return 1
 
-        # Call the main function
-        downloaded_files = get_repo_events(
+        # Call the main function (handles both download and fix operations)
+        get_repo_events(
             repo_owner=args.repo_owner,
             repo_name=args.repo_name,
             start_month=start_month,
             end_month=end_month,
             output_dir=args.output_dir,
+            fix_existing_files=args.fix_existing_files,
         )
 
-        if downloaded_files:
-            print(f"\n✅ Successfully downloaded {len(downloaded_files)} files!")
-            return 0
-        else:
-            print("\n❌ No files were downloaded.")
-            return 1
+        return 0
 
     except Exception:  # pylint: disable=broad-except
         traceback.print_exc()
