@@ -5,6 +5,7 @@
 import argparse
 import datetime
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -20,6 +21,9 @@ import requests
 from tqdm import tqdm
 
 # Constants
+THIS_FILE = os.path.abspath(inspect.getsourcefile(lambda: None) or __file__)
+THIS_DIR = os.path.dirname(THIS_FILE)
+
 DEFAULT_PER_PAGE = 100
 BASE_DELAY = 0.5  # seconds
 MAX_EXPONENTIAL_DELAY = 300  # seconds
@@ -321,13 +325,13 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
 
 def ensure_cache_dir() -> Path:
     """
-    Ensure the .cache directory exists and return its path.
+    Ensure the .cache/github_API_calls directory exists and return its path.
 
     Returns:
-        Path object for the .cache directory
+        Path object for the .cache/github_API_calls directory
     """
-    cache_dir = Path(".cache")
-    cache_dir.mkdir(exist_ok=True)
+    cache_dir = Path(THIS_DIR) / ".cache" / "github_API_calls"
+    cache_dir.mkdir(exist_ok=True, parents=True)
     return cache_dir
 
 

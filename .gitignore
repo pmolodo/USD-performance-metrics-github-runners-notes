@@ -2,8 +2,8 @@
 *.json
 *pr_push_times.json*
 
-# output from github_archive_repo_events.py
-github_archive_data/
+# output from github_archive_repo_events.py, and API call caches
+.cache/
 
 # python byte-compiled / optimized files
 __pycache__/

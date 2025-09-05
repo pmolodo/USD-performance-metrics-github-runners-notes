@@ -23,6 +23,7 @@ Set up Application Default Credentials with: gcloud auth application-default log
 
 import argparse
 import datetime
+import inspect
 import json
 import os
 import sys
@@ -34,7 +35,11 @@ from google.cloud import bigquery
 # Constants
 ###############################################################################
 
-DEFAULT_OUTPUT_DIR = "github_archive_data"
+
+THIS_FILE = os.path.abspath(inspect.getsourcefile(lambda: None) or __file__)
+THIS_DIR = os.path.dirname(THIS_FILE)
+
+DEFAULT_OUTPUT_DIR = os.path.join(THIS_DIR, ".cache", "github_archive_data")
 
 ###############################################################################
 # Core functions
