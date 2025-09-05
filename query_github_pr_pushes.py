@@ -247,6 +247,17 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
                 repo_info = f"_repo-{owner}-{project}"
         else:
             repo_info = ""
+    elif "/events" in url and "/repos/" in url:
+        api_type = "repo-events"
+        # Extract repo info from events URL
+        # Format: /repos/{owner}/{project}/events
+        parts = url.split("/")
+        if len(parts) >= 5 and "repos" in url:
+            owner = parts[parts.index("repos") + 1]
+            project = parts[parts.index("repos") + 2]
+            repo_info = f"_repo-{owner}-{project}"
+        else:
+            repo_info = ""
     else:
         # Generic API call
         api_type = "api-call"
@@ -503,6 +514,83 @@ def cached_api_call(
 ###############################################################################
 # Core functions
 ###############################################################################
+
+
+def fetch_repository_events(
+    owner: str,
+    project: str,
+    headers: dict,
+    verbosity: int = 1,
+) -> list:
+    """
+    Fetch all repository events using the GitHub Events API.
+
+    This fetches events like PushEvent, which group commits together naturally,
+    providing a more concrete view of push activities compared to individual
+    commit timeline events.
+
+    Args:
+        owner: Repository owner
+        project: Repository name
+        headers: HTTP headers for API requests
+        verbosity: Verbosity level for output
+
+    Returns:
+        List of repository events from the GitHub Events API
+    """
+    events_url = f"https://api.github.com/repos/{owner}/{project}/events"
+    all_events = []
+    page = 1
+
+    if verbosity >= 1:
+        print(f"Fetching repository events from {owner}/{project}...")
+
+    # Initialize progress bar for events pagination
+    pbar = tqdm(desc="Fetching repository events", unit="event")
+
+    while True:
+        params = {
+            "page": page,
+            "per_page": DEFAULT_PER_PAGE,
+        }
+
+        # Make API call with caching
+        api_result = cached_api_call(events_url, headers, params, verbosity=verbosity)
+
+        if isinstance(api_result, FailedApiCall):
+            print(f"Error fetching repository events: {api_result.error_message}")
+            break
+
+        events_data = api_result.data
+
+        if not events_data:
+            break
+
+        all_events.extend(events_data)
+
+        # Update progress bar
+        pbar.n = len(all_events)
+        pbar.set_description(f"Fetching repository events ({len(all_events)} total)")
+        pbar.refresh()
+
+        # GitHub's events API returns up to 300 events and only includes
+        # events from the past 30 days, so we don't need to worry about
+        # infinite pagination
+        if len(events_data) < DEFAULT_PER_PAGE:
+            break
+
+        page += 1
+
+    # Final update to show completion
+    pbar.n = len(all_events)
+    pbar.set_description(f"Fetched {len(all_events)} repository events")
+    pbar.refresh()
+    pbar.close()
+
+    if verbosity >= 1:
+        print(f"Retrieved {len(all_events)} repository events")
+
+    return all_events
 
 
 def parse_datetime_string(
@@ -954,6 +1042,11 @@ def query_github_pr_pushes(
         )
 
     print(f"Fetching PRs for {owner}/{project}...")
+
+    # Fetch repository events first (for future push event analysis)
+    repository_events = fetch_repository_events(owner, project, headers, verbosity)
+    # Note: repository_events data is stored but not processed yet per user instructions
+    _ = repository_events  # Acknowledge the variable is intentionally unused for now
 
     # Process time filters once outside the loop
     start_dt = None
