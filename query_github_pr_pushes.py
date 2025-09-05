@@ -217,6 +217,30 @@ def _build_cache_key(url: str, sorted_params: list | None = None) -> str:
     return cache_key
 
 
+def get_api_call_type(url: str) -> str:
+    """
+    Determine API call type from URL.
+
+    Args:
+        url: The API URL
+
+    Returns:
+        String identifying the API call type
+
+    Raises:
+        ValueError: If URL format is not recognized
+    """
+    if "search/issues" in url:
+        return "search-issues"
+    elif "/timeline" in url:
+        return "timeline"
+    elif "/events" in url and "/repos/" in url:
+        return "repo-events"
+    else:
+        # Unknown API call - we should handle all specific API types
+        raise ValueError(f"Unknown API URL format for caching: {url}")
+
+
 def get_cache_filename(url: str, params: dict | None = None) -> str:
     """
     Generate a human-readable cache filename based on URL and parameters.
@@ -229,11 +253,11 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
         A human-readable filename safe for filesystem usage
     """
     # Extract API type and relevant info from URL
-    if "search/issues" in url:
-        api_type = "search-issues"
-        repo_info = ""
-    elif "/timeline" in url:
-        api_type = "timeline"
+    api_type = get_api_call_type(url)
+
+    # Extract repo info based on API type
+    repo_info = ""
+    if api_type == "timeline":
         # Extract repo and PR info from timeline URL
         # Format: /repos/{owner}/{project}/issues/{pr_number}/timeline
         parts = url.split("/")
@@ -245,10 +269,7 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
                 repo_info = f"_repo-{owner}-{project}_pr-{pr_number}"
             else:
                 repo_info = f"_repo-{owner}-{project}"
-        else:
-            repo_info = ""
-    elif "/events" in url and "/repos/" in url:
-        api_type = "repo-events"
+    elif api_type == "repo-events":
         # Extract repo info from events URL
         # Format: /repos/{owner}/{project}/events
         parts = url.split("/")
@@ -256,11 +277,6 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
             owner = parts[parts.index("repos") + 1]
             project = parts[parts.index("repos") + 2]
             repo_info = f"_repo-{owner}-{project}"
-        else:
-            repo_info = ""
-    else:
-        # Unknown API call - we should handle all specific API types
-        raise ValueError(f"Unknown API URL format for caching: {url}")
 
     # Sort params once for both human-readable format and hash
     sorted_params = None
