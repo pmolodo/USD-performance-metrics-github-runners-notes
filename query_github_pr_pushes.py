@@ -724,6 +724,7 @@ def process_single_pr(
     project: str,
     start_dt: datetime.datetime | None,
     end_dt: datetime.datetime | None,
+    push_events_by_ref: dict,
     verbosity: int = 1,
 ) -> ProcessedPr | FailedPr:
     """Process a single PR to extract timeline data.
@@ -735,6 +736,8 @@ def process_single_pr(
         project: Repository name
         start_dt: Optional start datetime filter
         end_dt: Optional end datetime filter
+        push_events_by_ref: Dictionary mapping git refs to PushEvent lists
+        verbosity: Verbosity level for output
 
     Returns:
         ProcessedPr on success, FailedPr on failure
@@ -818,6 +821,37 @@ def process_single_pr(
                         event_data["commit_id"] = commit_id
 
                     events.append(event_data)
+
+        # Process push events from repository events API
+        # Get the PR's head branch reference
+        head_ref = pr_item.get("head", {}).get("ref")
+        if head_ref:
+            # Construct the full ref name (GitHub API uses refs/heads/branch_name format)
+            full_head_ref = f"refs/heads/{head_ref}"
+
+            # Look for push events on this branch
+            if full_head_ref in push_events_by_ref:
+                for push_event in push_events_by_ref[full_head_ref]:
+                    push_time_str = push_event.get("created_at")
+                    if push_time_str:
+                        push_time = parse_datetime_string(push_time_str, True)
+                        if is_timestamp_in_range(push_time, start_dt, end_dt):
+                            push_data = {
+                                "event": "push",
+                                "time": push_time.isoformat(),
+                            }
+
+                            # Add commit info if available
+                            payload = push_event.get("payload", {})
+                            commits = payload.get("commits", [])
+                            if commits:
+                                push_data["commit_count"] = str(len(commits))
+                                # Add the head commit sha
+                                head_commit = payload.get("head")
+                                if head_commit:
+                                    push_data["commit_id"] = head_commit
+
+                            events.append(push_data)
 
         # Return successful result
         return ProcessedPr(
@@ -1106,7 +1140,7 @@ def query_github_pr_pushes(
     print(f"Fetching PRs for {owner}/{project}...")
 
     # Fetch and process repository events to extract PushEvents organized by ref
-    get_repository_push_events(owner, project, headers, verbosity)
+    push_events_by_ref = get_repository_push_events(owner, project, headers, verbosity)
 
     # Process time filters once outside the loop
     start_dt = None
@@ -1154,7 +1188,14 @@ def query_github_pr_pushes(
 
         # Process the PR and get result
         result = process_single_pr(
-            task, headers, owner, project, start_dt, end_dt, verbosity
+            task,
+            headers,
+            owner,
+            project,
+            start_dt,
+            end_dt,
+            push_events_by_ref,
+            verbosity,
         )
 
         # Initialize sleep time for this iteration
