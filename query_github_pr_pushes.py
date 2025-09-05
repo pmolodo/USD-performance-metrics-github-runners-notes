@@ -569,6 +569,11 @@ def get_event_time_str(event: dict) -> str:
     raise ValueError(f"No time string found for event: {event}")
 
 
+def get_event_time(event: dict) -> datetime.datetime:
+    """Get the datetime object from a timeline event."""
+    return parse_datetime_string(get_event_time_str(event), True)
+
+
 def process_single_pr(
     task: PRTask,
     headers: dict,
@@ -648,13 +653,10 @@ def process_single_pr(
                     "merged",
                     "reopened",
                 ]:
-                    event_time_str = get_event_time_str(event)
-                    if event_time_str:
-                        event_time = parse_datetime_string(event_time_str, True)
-                        if is_timestamp_in_range(event_time, start_dt, end_dt):
-                            events.append(
-                                {"event": event_type, "time": event_time.isoformat()}
-                            )
+                    event_time = get_event_time(event)
+                    if not is_timestamp_in_range(event_time, start_dt, end_dt):
+                        continue
+                    events.append({"event": event_type, "time": event_time.isoformat()})
 
         # Return successful result
         return ProcessedPr(
