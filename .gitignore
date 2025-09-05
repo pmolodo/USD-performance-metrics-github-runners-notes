@@ -2,6 +2,9 @@
 *.json
 *pr_push_times.json*
 
+# output from github_archive_repo_events.py
+github_archive_data/
+
 # python byte-compiled / optimized files
 __pycache__/
 *.py[co]

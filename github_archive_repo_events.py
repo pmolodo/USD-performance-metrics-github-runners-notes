@@ -31,6 +31,12 @@ import traceback
 from google.cloud import bigquery
 
 ###############################################################################
+# Constants
+###############################################################################
+
+DEFAULT_OUTPUT_DIR = "github_archive_data"
+
+###############################################################################
 # Core functions
 ###############################################################################
 
@@ -104,7 +110,7 @@ def get_repo_events(
     repo_name: str,
     start_month: datetime.datetime | None = None,
     end_month: datetime.datetime | None = None,
-    output_dir: str = "github_archive_data",
+    output_dir: str = DEFAULT_OUTPUT_DIR,
 ):
     """
     Download repository events from GitHub Archive for the given date range.
@@ -315,7 +321,7 @@ def get_parser():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="github_archive_data",
+        default=DEFAULT_OUTPUT_DIR,
         help="Directory to save downloaded files",
     )
 
