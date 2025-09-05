@@ -553,6 +553,22 @@ def is_timestamp_in_range(
     )
 
 
+def get_event_time_str(event: dict) -> str:
+    """Get the time string from a timeline event."""
+    time = event.get("created_at")
+    if time is not None:
+        return time
+
+    # if the event type is "committed", use ["committer"]["date"]
+    event_type = event.get("event")
+    if event_type == "committed":
+        time = event.get("committer", {}).get("date")
+        if time is not None:
+            return time
+
+    raise ValueError(f"No time string found for event: {event}")
+
+
 def process_single_pr(
     task: PRTask,
     headers: dict,
@@ -633,7 +649,7 @@ def process_single_pr(
                     "merged",
                     "reopened",
                 ]:
-                    event_time_str = event.get("created_at")
+                    event_time_str = get_event_time_str(event)
                     if event_time_str:
                         event_time = parse_datetime_string(event_time_str, True)
                         if is_timestamp_in_range(event_time, start_dt, end_dt):
