@@ -643,7 +643,6 @@ def process_single_pr(
                 event_type = event.get("event")
                 if event_type in [
                     "committed",
-                    "pushed",
                     "head_ref_force_pushed",
                     "head_ref_restored",
                     "merged",
