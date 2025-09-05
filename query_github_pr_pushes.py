@@ -559,13 +559,6 @@ def get_event_time_str(event: dict) -> str:
     if time is not None:
         return time
 
-    # if the event type is "committed", use ["committer"]["date"]
-    event_type = event.get("event")
-    if event_type == "committed":
-        time = event.get("committer", {}).get("date")
-        if time is not None:
-            return time
-
     raise ValueError(f"No time string found for event: {event}")
 
 
@@ -647,7 +640,6 @@ def process_single_pr(
             for event in timeline_events:
                 event_type = event.get("event")
                 if event_type in [
-                    "committed",
                     "head_ref_force_pushed",
                     "head_ref_restored",
                     "merged",
