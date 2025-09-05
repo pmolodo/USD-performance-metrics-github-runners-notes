@@ -652,11 +652,27 @@ def process_single_pr(
                     "head_ref_restored",
                     "merged",
                     "reopened",
+                    "closed",
                 ]:
                     event_time = get_event_time(event)
                     if not is_timestamp_in_range(event_time, start_dt, end_dt):
                         continue
-                    events.append({"event": event_type, "time": event_time.isoformat()})
+
+                    event_type = event["event"]
+                    commit_id = event.get("commit_id")
+
+                    if event_type == "closed" and commit_id is None:
+                        # We're only interested in "closed" events that have an
+                        # associated commit ID, which means that they were
+                        # closed because a commit has a "closes" or "fixes"
+                        # comment - which we consider similar to a merge.
+                        continue
+
+                    event_data = {"event": event_type, "time": event_time.isoformat()}
+                    if commit_id is not None:
+                        event_data["commit_id"] = commit_id
+
+                    events.append(event_data)
 
         # Return successful result
         return ProcessedPr(
