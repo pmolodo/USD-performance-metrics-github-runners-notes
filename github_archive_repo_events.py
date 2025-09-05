@@ -154,30 +154,51 @@ def get_repo_events(
     print(f"Output directory: {output_dir}")
     print()
 
-    # Build queries and estimate total cost
+    # Check for existing files and build queries for missing ones
     queries = []
+    existing_files = []
     total_bytes = 0
 
-    print("Estimating query costs...")
+    print("Checking for existing files and estimating costs for missing ones...")
     for year, month in months_to_process:
-        query = get_repo_events_month_query(repo_owner, repo_name, year, month)
-        try:
-            bytes_processed = check_query_bytes_processed(query)
-            queries.append((year, month, query, bytes_processed))
-            total_bytes += bytes_processed
-            print(
-                f"  {year}-{month:02d}: {bytes_processed:,} bytes"
-                f" ({bytes_processed/1024**3:.3f} GB)"
-            )
-        except Exception as e:
-            print(f"  {year}-{month:02d}: Error estimating cost - {e}")
-            raise
+        # Create filename to check if it already exists
+        filename = f"{repo_owner}_{repo_name}_{year}_{month:02d}.json"
+        filepath = os.path.join(output_dir, filename)
+
+        if os.path.exists(filepath):
+            print(f"  {year}-{month:02d}: File already exists, skipping")
+            existing_files.append(filepath)
+        else:
+            # File doesn't exist, need to query for it
+            query = get_repo_events_month_query(repo_owner, repo_name, year, month)
+            try:
+                bytes_processed = check_query_bytes_processed(query)
+                queries.append((year, month, query, bytes_processed, filepath))
+                total_bytes += bytes_processed
+                print(
+                    f"  {year}-{month:02d}: {bytes_processed:,} bytes"
+                    f" ({bytes_processed/1024**3:.3f} GB)"
+                )
+            except Exception as e:
+                print(f"  {year}-{month:02d}: Error estimating cost - {e}")
+                raise
 
     total_gb = total_bytes / (1024**3)
     total_tb = total_gb / 1024
 
+    # Summary of what needs to be done
     print()
-    print("Total estimated cost:")
+    print("Summary:")
+    print(f"  Total months requested: {len(months_to_process)}")
+    print(f"  Files already exist: {len(existing_files)}")
+    print(f"  Files to download: {len(queries)}")
+
+    if len(queries) == 0:
+        print("\n✅ All requested files already exist! No downloads needed.")
+        return existing_files
+
+    print()
+    print("Total estimated cost for new downloads:")
     print(f"  {total_bytes:,} bytes")
     print(f"  {total_gb:.3f} GB")
     print(f"  {total_tb:.6f} TB")
@@ -189,19 +210,18 @@ def get_repo_events(
         print()
 
     # Ask for confirmation
-    response = input(
-        f"Proceed with downloading {len(months_to_process)} months of data? (y/N): "
-    )
+    response = input(f"Proceed with downloading {len(queries)} new files? (y/N): ")
     if response.lower() != "y":
         print("Download cancelled.")
-        return []
+        print(f"Returning {len(existing_files)} existing files.")
+        return existing_files
 
     # Run queries and save to disk
     downloaded_files = []
 
     print()
     print("Starting downloads...")
-    for i, (year, month, query, estimated_bytes) in enumerate(queries, 1):
+    for i, (year, month, query, estimated_bytes, filepath) in enumerate(queries, 1):
         print(f"[{i}/{len(queries)}] Downloading {year}-{month:02d}...")
 
         # Execute query
@@ -219,9 +239,7 @@ def get_repo_events(
                     event_dict[key] = value.isoformat()
             events.append(event_dict)
 
-        # Save to file
-        filename = f"{repo_owner}_{repo_name}_{year}_{month:02d}.json"
-        filepath = os.path.join(output_dir, filename)
+        # Save to file (filepath is already computed)
 
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(
@@ -243,9 +261,17 @@ def get_repo_events(
         downloaded_files.append(filepath)
         print(f"  Saved {len(events)} events to {filepath}")
 
+    # Combine existing and newly downloaded files
+    all_files = existing_files + downloaded_files
+
     print()
-    print(f"Download complete! Saved {len(downloaded_files)} files to {output_dir}")
-    return downloaded_files
+    print("Process complete!")
+    print(f"  Existing files: {len(existing_files)}")
+    print(f"  Downloaded files: {len(downloaded_files)}")
+    print(f"  Total files: {len(all_files)}")
+    print(f"  Output directory: {output_dir}")
+
+    return all_files
 
 
 ###############################################################################
