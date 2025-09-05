@@ -261,6 +261,19 @@ def get_repo_events(
             for key, value in event_dict.items():
                 if isinstance(value, datetime.datetime):
                     event_dict[key] = value.isoformat()
+
+            # Parse JSON fields (payload and other)
+            for field_name in ["payload", "other"]:
+                if field_name in event_dict and isinstance(event_dict[field_name], str):
+                    try:
+                        event_dict[field_name] = json.loads(event_dict[field_name])
+                    except (json.JSONDecodeError, TypeError) as e:
+                        print(
+                            f"Warning: Failed to parse {field_name} as JSON for"
+                            f" event: {e}"
+                        )
+                        # Keep the original string value
+
             events.append(event_dict)
 
         # Save to file (filepath is already computed)
