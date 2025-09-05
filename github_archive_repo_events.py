@@ -22,6 +22,7 @@ Set up Application Default Credentials with: gcloud auth application-default log
 """
 
 import argparse
+import dataclasses
 import datetime
 import inspect
 import json
@@ -48,6 +49,46 @@ except ImportError:
     import bigquery_utils
 
 DEFAULT_OUTPUT_DIR = os.path.join(THIS_DIR, ".cache", "github_archive_data")
+
+# GitHub Archive earliest available data
+EARLIEST_ARCHIVE_DATE = datetime.date(2011, 2, 11)
+
+###############################################################################
+# Data Classes
+###############################################################################
+
+
+@dataclasses.dataclass(frozen=True, order=True)
+class Month:
+    year: int
+    month: int
+
+    def __post_init__(self):
+        if not (1 <= self.month <= 12):
+            raise ValueError(f"Month must be in range 1-12, got {self.month}")
+
+    @classmethod
+    def from_datetime(cls, dt: datetime.datetime | datetime.date) -> "Month":
+        return cls(year=dt.year, month=dt.month)
+
+    def next_month(self) -> "Month":
+        """Get the next month."""
+        if self.month == 12:
+            return Month(self.year + 1, 1)
+        else:
+            return Month(self.year, self.month + 1)
+
+    def __str__(self) -> str:
+        return f"{self.year}-{self.month:02d}"
+
+
+EARLIEST_ARCHIVE_MONTH = Month.from_datetime(EARLIEST_ARCHIVE_DATE)
+CURRENT_MONTH = Month.from_datetime(datetime.date.today())
+
+
+###############################################################################
+# Global Variables
+###############################################################################
 
 # Global BigQuery client cache
 _bigquery_client = None
@@ -122,40 +163,35 @@ def check_query_bytes_processed(query_sql, credentials_file_pattern=None):
     return job.total_bytes_processed
 
 
-def get_github_archive_month_table_name(year: int, month: int) -> str:
+def get_github_archive_month_table_name(month: Month) -> str:
     """
-    Get the name of the GitHub Archive month table for the given year and month.
+    Get the name of the GitHub Archive month table for the given month.
     """
-    return f"githubarchive.month.{year}{month:02d}"
+    return f"githubarchive.month.{month.year}{month.month:02d}"
 
 
-def get_repo_events_month_query(
-    repo_owner: str, repo_name: str, year: int, month: int
-) -> str:
+def get_repo_events_month_query(repo_owner: str, repo_name: str, month: Month) -> str:
     """
     Generate SQL query for all repo events for the given repo and month.
 
     Args:
         repo_owner: Repository owner (e.g., "PixarAnimationStudios")
         repo_name: Repository name (e.g., "OpenUSD")
-        year: Year to query (must be >= 2011 and <= current year)
-        month: Month to query (must be in range 1-12)
+        month: Month to query
 
     Returns:
         str: SQL query string for BigQuery
     """
-    now = datetime.datetime.now()
-    if year < 2011:
-        raise ValueError("Github Archive data only available for years >= 2011")
-    elif year > now.year:
+    if month < EARLIEST_ARCHIVE_MONTH:
         raise ValueError(
-            "Github Archive data only available for years <= current year (got:"
-            f" {year})"
+            f"Github Archive data only available starting on {EARLIEST_ARCHIVE_MONTH}"
         )
-    if month < 1 or month > 12:
-        raise ValueError("Month must be in range 1-12")
+    elif month > CURRENT_MONTH:
+        raise ValueError(
+            f"Github Archive data only available up to current month (got: {month})"
+        )
 
-    table = get_github_archive_month_table_name(year, month)
+    table = get_github_archive_month_table_name(month)
 
     query = f"""
     SELECT *
@@ -170,8 +206,8 @@ def get_repo_events_month_query(
 def get_repo_events(
     repo_owner: str,
     repo_name: str,
-    start_month: datetime.datetime | None = None,
-    end_month: datetime.datetime | None = None,
+    start_month: Month | None = None,
+    end_month: Month | None = None,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     fix_existing_files: bool = False,
     credentials_file_pattern: str | None = None,
@@ -186,6 +222,7 @@ def get_repo_events(
         end_month: End month (defaults to current month if None)
         output_dir: Directory to save downloaded files
         fix_existing_files: If True, also fix JSON parsing in existing files
+        credentials_file_pattern: Optional credentials file pattern to use
 
     Returns:
         list: List of on-disk file paths for all the months in the range (whether
@@ -193,28 +230,22 @@ def get_repo_events(
             than the number of months if the user cancelled or there were errors.
     """
 
-    # Set default dates if not provided
-    now = datetime.datetime.now()
+    # Set default months if not provided
     if start_month is None:
-        start_month = now.replace(day=1)  # First day of current month
+        start_month = CURRENT_MONTH
     if end_month is None:
-        end_month = now.replace(day=1)  # First day of current month
+        end_month = CURRENT_MONTH
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate list of months to process
     months_to_process = []
-    current = start_month.replace(day=1)  # Normalize to first day
-    end = end_month.replace(day=1)
+    current_month = start_month
 
-    while current <= end:
-        months_to_process.append((current.year, current.month))
-        # Move to next month
-        if current.month == 12:
-            current = current.replace(year=current.year + 1, month=1)
-        else:
-            current = current.replace(month=current.month + 1)
+    while current_month <= end_month:
+        months_to_process.append(current_month)
+        current_month = current_month.next_month()
 
     if not months_to_process:
         raise ValueError("No months to process")
@@ -232,9 +263,7 @@ def get_repo_events(
             f"Planning to download {len(months_to_process)} months of data for"
             f" {repo_owner}/{repo_name}"
         )
-    print(
-        f"Date range: {start_month.strftime('%Y-%m')} to {end_month.strftime('%Y-%m')}"
-    )
+    print(f"Month range: {start_month} to {end_month}")
     print(f"Output directory: {output_dir}")
     print()
 
@@ -246,29 +275,29 @@ def get_repo_events(
     print(
         "Checking for existing files and estimating bytes scanned for missing ones..."
     )
-    for year, month in months_to_process:
+    for month in months_to_process:
         # Create filename to check if it already exists
-        filename = f"{repo_owner}_{repo_name}_{year}_{month:02d}.json"
+        filename = f"{repo_owner}_{repo_name}_{month}.json"
         filepath = os.path.join(output_dir, filename)
 
         if os.path.exists(filepath):
-            print(f"  {year}-{month:02d}: File already exists, skipping")
+            print(f"  {month}: File already exists, skipping")
             existing_files.append(filepath)
         else:
             # File doesn't exist, need to query for it
-            query = get_repo_events_month_query(repo_owner, repo_name, year, month)
+            query = get_repo_events_month_query(repo_owner, repo_name, month)
             try:
                 bytes_processed = check_query_bytes_processed(
                     query, credentials_file_pattern
                 )
-                queries.append((year, month, query, bytes_processed, filepath))
+                queries.append((month, query, bytes_processed, filepath))
                 total_bytes += bytes_processed
                 print(
-                    f"  {year}-{month:02d}: {bytes_processed:,} bytes"
+                    f"  {month}: {bytes_processed:,} bytes"
                     f" ({bytes_processed/1024**3:.3f} GB)"
                 )
             except Exception as e:
-                print(f"  {year}-{month:02d}: Error estimating bytes scanned - {e}")
+                print(f"  {month}: Error estimating bytes scanned - {e}")
                 raise
 
     total_gb = total_bytes / (1024**3)
@@ -330,8 +359,8 @@ def get_repo_events(
     if len(queries) > 0:
         print()
         print("Starting downloads...")
-        for i, (year, month, query, estimated_bytes, filepath) in enumerate(queries, 1):
-            print(f"[{i}/{len(queries)}] Downloading {year}-{month:02d}...")
+        for i, (month, query, estimated_bytes, filepath) in enumerate(queries, 1):
+            print(f"[{i}/{len(queries)}] Downloading {month}...")
 
             # Only create BigQuery client when we actually need to download data
             client = get_bigquery_client(credentials_file_pattern)
@@ -361,8 +390,8 @@ def get_repo_events(
                     {
                         "repo_owner": repo_owner,
                         "repo_name": repo_name,
-                        "year": year,
-                        "month": month,
+                        "year": month.year,
+                        "month": month.month,
                         "download_time": datetime.datetime.now().isoformat(),
                         "event_count": len(events),
                         "estimated_bytes_processed": estimated_bytes,
@@ -488,22 +517,22 @@ def get_parser():
     return parser
 
 
-def parse_month_string(month_str: str) -> datetime.datetime:
+def parse_month_string(month_str: str) -> Month:
     """
-    Parse a month string in YYYY-MM format to datetime.
+    Parse a month string in YYYY-MM format to Month object.
 
     Args:
         month_str: Month string in YYYY-MM format (e.g., "2025-07")
 
     Returns:
-        datetime.datetime: First day of the specified month
+        Month: Month object for the specified month
 
     Raises:
         ValueError: If the format is invalid
     """
     try:
         year, month = month_str.split("-")
-        return datetime.datetime(int(year), int(month), 1)
+        return Month(int(year), int(month))
     except (ValueError, TypeError) as e:
         raise ValueError(
             f"Invalid month format '{month_str}'. Expected YYYY-MM (e.g., '2025-07')"
