@@ -3,7 +3,27 @@
 Quick script to check BigQuery quota usage.
 """
 
+import argparse
+import inspect
+import os
+import sys
+
 from google.cloud import bigquery
+
+###############################################################################
+# Constants
+###############################################################################
+
+THIS_FILE = os.path.abspath(inspect.getsourcefile(lambda: None) or __file__)
+THIS_DIR = os.path.dirname(THIS_FILE)
+
+# Import bigquery_utils with fallback to add THIS_DIR to sys.path
+try:
+    import bigquery_utils
+except ImportError:
+    # Add THIS_DIR to sys.path and try again
+    sys.path.insert(0, THIS_DIR)
+    import bigquery_utils
 
 
 def check_quota():
@@ -69,11 +89,45 @@ def check_quota():
             "project_id": project_id,
         }
 
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-except
         print(f"Error checking quota: {e}")
         print("Manual check: https://console.cloud.google.com/bigquery")
         return None
 
 
+def get_parser():
+    """Create and return the argument parser."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # Add BigQuery-related arguments
+    bigquery_utils.add_bigquery_args(parser)
+
+    return parser
+
+
+def main(argv=None):
+    """Main function with argument parsing and credential setup."""
+    if argv is None:
+        argv = sys.argv[1:]
+
+    parser = get_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        # Set up Google Cloud credentials
+        bigquery_utils.setup_credentials(args.credentials_file)
+
+        # Check quota
+        result = check_quota()
+        return 0 if result else 1
+
+    except Exception as e:  # pylint: disable=broad-except
+        print(f"Error: {e}")
+        return 1
+
+
 if __name__ == "__main__":
-    check_quota()
+    sys.exit(main())
