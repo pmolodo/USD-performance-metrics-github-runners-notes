@@ -668,6 +668,9 @@ def process_single_pr(
                         # comment - which we consider similar to a merge.
                         continue
 
+                    if not commit_id:
+                        commit_id = event.get("sha")
+
                     event_data = {"event": event_type, "time": event_time.isoformat()}
                     if commit_id is not None:
                         event_data["commit_id"] = commit_id
