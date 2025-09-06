@@ -236,7 +236,7 @@ def get_repo_events_month_query(repo_owner: str, repo_name: str, month: Month) -
     return query
 
 
-def get_repo_events(
+def download_repo_events(
     repo_owner: str,
     repo_name: str,
     start_month: Month | None = None,
@@ -595,7 +595,7 @@ def main(argv=None):
             return 1
 
         # Call the main function (handles both download and fix operations)
-        get_repo_events(
+        download_repo_events(
             repo_owner=args.repo_owner,
             repo_name=args.repo_name,
             start_month=start_month,
