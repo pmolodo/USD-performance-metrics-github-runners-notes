@@ -542,6 +542,113 @@ def fetch_repository_events(
     verbosity: int = 1,
 ) -> list:
     """
+    Fetch all repository events using a combination of the GitHub Archive and
+    the GitHub Events REST API.
+
+    This fetches events like PushEvent, which group commits together naturally,
+    providing a more concrete view of push activities compared to individual
+    commit timeline events.
+    """
+    return fetch_repository_events_rest_api(owner, project, headers, verbosity)
+
+
+def fetch_archived_repository_events(
+    owner: str,
+    project: str,
+    verbosity: int = 1,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
+) -> list:
+    """
+    Fetch repository events using the GitHub Archive.
+
+    Downloads archive data for the requested time range and filters events
+    to match the specified time window.
+
+    Args:
+        owner: Repository owner (e.g., "PixarAnimationStudios")
+        project: Repository name (e.g., "OpenUSD")
+        headers: GitHub API headers (not used for archive, but kept for compatibility)
+        verbosity: Verbosity level for output
+        start_time: Start of time range to fetch events for
+        end_time: End of time range to fetch events for
+
+    Returns:
+        list: Repository events from GitHub Archive within the time range
+    """
+    import github_archive_repo_events
+
+    if verbosity >= 1:
+        print(f"Fetching repository events from GitHub Archive for {owner}/{project}")
+
+    # Determine month range for months to fetch
+    # Use earliest archive date if no start_time specified
+    if start_time is None:
+        start_month = github_archive_repo_events.EARLIEST_ARCHIVE_MONTH
+    else:
+        start_month = github_archive_repo_events.Month.from_datetime(start_time)
+
+    # Use current time if no end_time specified
+    if end_time is None:
+        end_month = github_archive_repo_events.CURRENT_MONTH
+    else:
+        end_month = github_archive_repo_events.Month.from_datetime(end_time)
+
+    if verbosity >= 2:
+        print(f"Time range: {start_time} to {end_time}")
+        print(f"Archive months: {start_month} to {end_month}")
+
+    # Download archive data for the required months
+    downloaded_files = github_archive_repo_events.download_repo_events(
+        repo_owner=owner,
+        repo_name=project,
+        start_month=start_month,
+        end_month=end_month,
+    )
+
+    # Collect events from downloaded files and filter by time range
+    all_events = []
+
+    for filepath in downloaded_files:
+        if verbosity >= 2:
+            print(f"Processing archive file: {os.path.basename(filepath)}")
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            events = data.get("events", [])
+
+            for event in events:
+                if start_time or end_time:
+                    event_time = parse_datetime_string(event["created_at"])
+
+                    # Filter by time range if specified
+                    if start_time and event_time < start_time:
+                        continue
+                    if end_time and event_time > end_time:
+                        continue
+
+                all_events.append(event)
+
+        except (json.JSONDecodeError, OSError) as e:
+            if verbosity >= 1:
+                print(f"Warning: Could not read archive file {filepath}: {e}")
+            raise
+
+    if verbosity >= 1:
+        print(f"Fetched {len(all_events)} events from GitHub Archive")
+
+    return all_events
+
+
+def fetch_repository_events_rest_api(
+    owner: str,
+    project: str,
+    headers: dict,
+    verbosity: int = 1,
+) -> list:
+    """
     Fetch all repository events using the GitHub Events API.
 
     This fetches events like PushEvent, which group commits together naturally,
