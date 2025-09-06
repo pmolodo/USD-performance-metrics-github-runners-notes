@@ -263,3 +263,89 @@ class TestRecursiveDictMerge:
         # Should be the same object
         assert id(target) == target_id
         assert target == {"a": 1, "b": 2}
+
+
+class TestReadRepoEvents:
+    """Tests for read_repo_events function."""
+
+    def test_basic_payload_and_other_merge(self, tmp_path):
+        """Test basic merging of payload and other dicts into main event dict."""
+        # Create test JSON data
+        test_data = {
+            "repo_owner": "TestOwner",
+            "repo_name": "TestRepo",
+            "year": 2025,
+            "month": 1,
+            "event_count": 2,
+            "events": [
+                {
+                    "type": "PushEvent",
+                    "id": "12345",
+                    "public": True,
+                    "payload": {
+                        "push_id": 98765,
+                        "size": 1,
+                        "commits": [{"sha": "abc123", "message": "Test commit"}],
+                    },
+                    "actor": {"id": 123, "login": "testuser"},
+                    "other": {
+                        "actor": {"display_login": "Test User"},
+                        "additional_info": "extra_data",
+                    },
+                },
+                {
+                    "type": "WatchEvent",
+                    "id": "67890",
+                    "public": True,
+                    "payload": {"action": "started"},
+                    "repo": {"id": 456, "name": "TestOwner/TestRepo"},
+                    # No "other" dict in this event
+                },
+            ],
+        }
+
+        # Write test data to temporary file
+        test_file = tmp_path / "test_events.json"
+        with open(test_file, "w", encoding="utf-8") as f:
+            import json
+
+            json.dump(test_data, f)
+
+        # Read and process the file
+        result = github_archive_repo_events.read_repo_events(str(test_file))
+
+        # Verify structure is maintained
+        assert result["repo_owner"] == "TestOwner"
+        assert result["repo_name"] == "TestRepo"
+        assert result["event_count"] == 2
+        assert len(result["events"]) == 2
+
+        # Check first event - payload and other should be merged
+        event1 = result["events"][0]
+        assert event1["type"] == "PushEvent"
+        assert event1["id"] == "12345"
+        assert event1["public"] is True
+
+        # Payload fields should be merged into main event
+        assert "payload" not in event1  # payload dict should be removed
+        assert event1["push_id"] == 98765
+        assert event1["size"] == 1
+        assert len(event1["commits"]) == 1
+        assert event1["commits"][0]["sha"] == "abc123"
+
+        # Other fields should be merged into main event
+        assert "other" not in event1  # other dict should be removed
+        assert event1["additional_info"] == "extra_data"
+
+        # Actor should be recursively merged
+        assert event1["actor"]["id"] == 123
+        assert event1["actor"]["login"] == "testuser"
+        assert event1["actor"]["display_login"] == "Test User"
+
+        # Check second event - only payload merge (no other)
+        event2 = result["events"][1]
+        assert event2["type"] == "WatchEvent"
+        assert event2["id"] == "67890"
+        assert "payload" not in event2  # payload dict should be removed
+        assert event2["action"] == "started"  # from payload
+        assert event2["repo"]["id"] == 456
