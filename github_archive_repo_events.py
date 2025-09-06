@@ -143,6 +143,39 @@ def decode_json_fields(event_dict):
     return changes_made
 
 
+def recursive_dict_merge(target_dict, source_dict):
+    """
+    Recursively merge source_dict into target_dict.
+
+    Args:
+        target_dict: Dictionary to merge into (modified in place)
+        source_dict: Dictionary to merge from
+
+    Raises:
+        ValueError: If a key exists in both dictionaries but is not a dict in both
+
+    Note:
+        Modifies target_dict in place. For nested dictionaries, the merge
+        is recursive. Raises an error for any conflicting keys that aren't both dicts.
+    """
+    for key, value in source_dict.items():
+        if key in target_dict:
+            # Key exists in both dicts
+            if isinstance(target_dict[key], dict) and isinstance(value, dict):
+                # Both values are dictionaries, merge recursively
+                recursive_dict_merge(target_dict[key], value)
+            else:
+                # At least one value is not a dict, this is an error
+                raise ValueError(
+                    f"Key '{key}' exists in both dictionaries but is not a dict in"
+                    f" both. Target type: {type(target_dict[key])}, Source type:"
+                    f" {type(value)}"
+                )
+        else:
+            # Key doesn't exist in target, add it
+            target_dict[key] = value
+
+
 def check_query_bytes_processed(query_sql, credentials_file_pattern=None):
     """
     Estimate query bytes processed without running it (dry run).
