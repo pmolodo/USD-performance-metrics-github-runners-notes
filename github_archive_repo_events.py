@@ -153,10 +153,12 @@ def recursive_dict_merge(target_dict, source_dict):
 
     Raises:
         ValueError: If a key exists in both dictionaries but is not a dict in both
+                   AND the values are not equal
 
     Note:
         Modifies target_dict in place. For nested dictionaries, the merge
-        is recursive. Raises an error for any conflicting keys that aren't both dicts.
+        is recursive. Allows equal values even when not both dicts, raises
+        an error only for actual conflicts (unequal non-dict values).
     """
     for key, value in source_dict.items():
         if key in target_dict:
@@ -164,8 +166,11 @@ def recursive_dict_merge(target_dict, source_dict):
             if isinstance(target_dict[key], dict) and isinstance(value, dict):
                 # Both values are dictionaries, merge recursively
                 recursive_dict_merge(target_dict[key], value)
+            elif target_dict[key] == value:
+                # Values are equal, no conflict - keep existing value
+                pass
             else:
-                # At least one value is not a dict, this is an error
+                # At least one value is not a dict and they're not equal, this is an error
                 raise ValueError(
                     f"Key '{key}' exists in both dictionaries but is not a dict in"
                     f" both. Target type: {type(target_dict[key])}, Source type:"

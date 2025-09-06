@@ -142,6 +142,40 @@ class TestRecursiveDictMerge:
         assert "Target type: <class 'str'>" in error_msg
         assert "Source type: <class 'str'>" in error_msg
 
+    def test_equal_values_no_error(self):
+        """Test that equal values don't raise error even when not both dicts."""
+        target = {
+            "string_key": "same_value",
+            "int_key": 42,
+            "list_key": [1, 2, 3],
+            "none_key": None,
+            "nested": {"inner_key": "inner_value"},
+        }
+        source = {
+            "string_key": "same_value",  # Same string
+            "int_key": 42,  # Same int
+            "list_key": [1, 2, 3],  # Same list
+            "none_key": None,  # Same None
+            "new_key": "added_value",  # New key
+            "nested": {
+                "inner_key": "inner_value",  # Same nested value
+                "new_inner": "new_value",  # New nested key
+            },
+        }
+
+        # This should not raise an error
+        github_archive_repo_events.recursive_dict_merge(target, source)
+
+        expected = {
+            "string_key": "same_value",
+            "int_key": 42,
+            "list_key": [1, 2, 3],
+            "none_key": None,
+            "new_key": "added_value",
+            "nested": {"inner_key": "inner_value", "new_inner": "new_value"},
+        }
+        assert target == expected
+
     def test_conflict_nested_path_raises_error(self):
         """Test that conflicts in nested paths raise appropriate errors."""
         target = {"level1": {"level2": {"conflict_key": "string"}}}
