@@ -268,8 +268,8 @@ class TestRecursiveDictMerge:
 class TestReadRepoEvents:
     """Tests for read_repo_events function."""
 
-    def test_basic_payload_and_other_merge(self, tmp_path):
-        """Test basic merging of payload and other dicts into main event dict."""
+    def test_basic_other_merge_payload_preserved(self, tmp_path):
+        """Test merging of other dict into main event dict while preserving payload."""
         # Create test JSON data
         test_data = {
             "repo_owner": "TestOwner",
@@ -320,32 +320,32 @@ class TestReadRepoEvents:
         assert result["event_count"] == 2
         assert len(result["events"]) == 2
 
-        # Check first event - payload and other should be merged
+        # Check first event - only other should be merged, payload preserved
         event1 = result["events"][0]
         assert event1["type"] == "PushEvent"
         assert event1["id"] == "12345"
         assert event1["public"] is True
 
-        # Payload fields should be merged into main event
-        assert "payload" not in event1  # payload dict should be removed
-        assert event1["push_id"] == 98765
-        assert event1["size"] == 1
-        assert len(event1["commits"]) == 1
-        assert event1["commits"][0]["sha"] == "abc123"
+        # Payload should be preserved as-is (matching GitHub REST API format)
+        assert "payload" in event1  # payload dict should be preserved
+        assert event1["payload"]["push_id"] == 98765
+        assert event1["payload"]["size"] == 1
+        assert len(event1["payload"]["commits"]) == 1
+        assert event1["payload"]["commits"][0]["sha"] == "abc123"
 
         # Other fields should be merged into main event
         assert "other" not in event1  # other dict should be removed
         assert event1["additional_info"] == "extra_data"
 
-        # Actor should be recursively merged
+        # Actor should be recursively merged (from other)
         assert event1["actor"]["id"] == 123
         assert event1["actor"]["login"] == "testuser"
         assert event1["actor"]["display_login"] == "Test User"
 
-        # Check second event - only payload merge (no other)
+        # Check second event - payload preserved, no other to merge
         event2 = result["events"][1]
         assert event2["type"] == "WatchEvent"
         assert event2["id"] == "67890"
-        assert "payload" not in event2  # payload dict should be removed
-        assert event2["action"] == "started"  # from payload
+        assert "payload" in event2  # payload dict should be preserved
+        assert event2["payload"]["action"] == "started"  # payload preserved
         assert event2["repo"]["id"] == 456

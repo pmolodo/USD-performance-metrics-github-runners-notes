@@ -185,14 +185,14 @@ def read_repo_events(json_filename):
     """
     Read repository events from a JSON file and transform them to be similar to GitHub REST API output.
 
-    This function merges the "payload" and "other" dictionaries into the main event dictionary,
-    making the structure match the GitHub REST API format more closely.
+    This function merges the "other" dictionary into the main event dictionary, while keeping
+    the "payload" field as-is (since GitHub REST API events also have a "payload" field).
 
     Args:
         json_filename: Path to the JSON file containing repository events data
 
     Returns:
-        dict: The modified data structure with payload/other fields merged into events
+        dict: The modified data structure with only "other" fields merged into events
 
     Raises:
         FileNotFoundError: If the specified file doesn't exist
@@ -207,13 +207,9 @@ def read_repo_events(json_filename):
     if "events" not in data:
         raise KeyError(f"No 'events' key found in {json_filename}")
 
-    # Process each event to merge payload and other into the main event dict
+    # Process each event to merge only "other" into the main event dict
+    # Keep "payload" as-is since GitHub REST API events also have "payload"
     for event in data["events"]:
-        # Merge payload dictionary into main event dict
-        if "payload" in event and isinstance(event["payload"], dict):
-            payload = event.pop("payload")
-            recursive_dict_merge(event, payload)
-
         # Merge other dictionary into main event dict
         if "other" in event and isinstance(event["other"], dict):
             other = event.pop("other")
