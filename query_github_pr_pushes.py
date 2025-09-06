@@ -659,9 +659,7 @@ def get_repository_push_events(
     return push_events_by_ref
 
 
-def parse_datetime_string(
-    dt_string: str, is_github_api_format: bool = False
-) -> datetime.datetime:
+def parse_datetime_string(dt_string: str) -> datetime.datetime:
     """
     Convert a datetime string to a timezone-aware datetime object.
 
@@ -673,9 +671,9 @@ def parse_datetime_string(
     Returns:
         A timezone-aware datetime object
     """
-    if is_github_api_format:
-        # GitHub API uses 'Z' suffix which needs to be converted to '+00:00'
-        dt_string = dt_string.replace("Z", "+00:00")
+    # GitHub API uses 'Z' suffix which needs to be converted to '+00:00'
+    if dt_string.endswith("Z"):
+        dt_string = dt_string[:-1] + "+00:00"
 
     dt = datetime.datetime.fromisoformat(dt_string)
 
@@ -718,7 +716,7 @@ def get_event_time_str(event: dict) -> str:
 
 def get_event_time(event: dict) -> datetime.datetime:
     """Get the datetime object from a timeline event."""
-    return parse_datetime_string(get_event_time_str(event), True)
+    return parse_datetime_string(get_event_time_str(event))
 
 
 def process_single_pr(
@@ -759,7 +757,7 @@ def process_single_pr(
                 api_call_made=False,
             )
 
-        pr_created = parse_datetime_string(pr_created_str, True)
+        pr_created = parse_datetime_string(pr_created_str)
 
         # Start with PR creation timestamp
         events = []
@@ -838,7 +836,7 @@ def process_single_pr(
                 for push_event in push_events_by_ref[full_head_ref]:
                     push_time_str = push_event.get("created_at")
                     if push_time_str:
-                        push_time = parse_datetime_string(push_time_str, True)
+                        push_time = parse_datetime_string(push_time_str)
                         if is_timestamp_in_range(push_time, start_dt, end_dt):
                             push_data = {
                                 "event": "push",
