@@ -536,6 +536,58 @@ def download_repo_events(
     return all_files
 
 
+def get_repo_events(
+    repo_owner: str,
+    repo_name: str,
+    start_month: Month | None = None,
+    end_month: Month | None = None,
+    output_dir: str = DEFAULT_OUTPUT_DIR,
+    fix_existing_files: bool = False,
+    credentials_file_pattern: str | None = None,
+):
+    """
+    Get repository events by first downloading them and then reading all files.
+
+    This function combines download_repo_events and read_repo_events to provide
+    a convenient way to get all events as a flattened list.
+
+    Args:
+        repo_owner: Repository owner (e.g., "PixarAnimationStudios")
+        repo_name: Repository name (e.g., "OpenUSD")
+        start_month: Start month (defaults to current month if None)
+        end_month: End month (defaults to current month if None)
+        output_dir: Directory to save downloaded files
+        fix_existing_files: If True, also fix JSON parsing in existing files
+        credentials_file_pattern: Optional credentials file pattern to use
+
+    Returns:
+        list: Flattened list of all events from all months in the date range
+    """
+    # First, download the repo events data
+    file_paths = download_repo_events(
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        start_month=start_month,
+        end_month=end_month,
+        output_dir=output_dir,
+        fix_existing_files=fix_existing_files,
+        credentials_file_pattern=credentials_file_pattern,
+    )
+
+    # Then read events from all files and flatten into a single list
+    all_events = []
+
+    for file_path in file_paths:
+        # Read events from this file
+        data = read_repo_events(file_path)
+
+        # Extract events and add to the flattened list
+        if "events" in data:
+            all_events.extend(data["events"])
+
+    return all_events
+
+
 ###############################################################################
 # CLI
 ###############################################################################
