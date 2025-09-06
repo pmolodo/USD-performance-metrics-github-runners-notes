@@ -535,11 +535,90 @@ def cached_api_call(
 ###############################################################################
 
 
+def filter_events_by_time_range(
+    events: list,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
+) -> list:
+    """
+    Filter a list of events by time range.
+
+    Args:
+        events: List of events to filter (each event must have 'created_at' field)
+        start_time: Start of time range to filter for (inclusive)
+        end_time: End of time range to filter for (inclusive)
+
+    Returns:
+        list: Filtered events within the specified time range
+    """
+    if not start_time and not end_time:
+        return events
+
+    filtered_events = []
+    for event in events:
+        event_time = parse_datetime_string(event["created_at"])
+
+        # Filter by time range if specified
+        if start_time and event_time < start_time:
+            continue
+        if end_time and event_time > end_time:
+            continue
+
+        filtered_events.append(event)
+
+    return filtered_events
+
+
+def time_range_overlaps_last_30_days(
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
+) -> bool:
+    """
+    Check if the given time range overlaps with the last 30 days from now.
+
+    Args:
+        start_time: Start of time range (None means beginning of time)
+        end_time: End of time range (None means current time)
+
+    Returns:
+        bool: True if the time range overlaps with the last 30 days
+    """
+    now = get_current_utc_time()
+    thirty_days_ago = now - datetime.timedelta(days=30)
+
+    # Define the last 30 days range: [thirty_days_ago, now]
+    last_30_days_start = thirty_days_ago
+    last_30_days_end = now
+
+    # Define the requested range, handling None values
+    # If start_time is None, it means "beginning of time" (very old date)
+    # If end_time is None, it means "current time"
+    range_start = (
+        start_time
+        if start_time is not None
+        else datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+    )
+    range_end = end_time if end_time is not None else now
+
+    # Handle invalid ranges (start_time after end_time)
+    if range_start > range_end:
+        return False
+
+    # Check if the ranges overlap using standard interval overlap logic:
+    # Two intervals [a, b] and [c, d] overlap if max(a, c) <= min(b, d)
+    overlap_start = max(last_30_days_start, range_start)
+    overlap_end = min(last_30_days_end, range_end)
+
+    return overlap_start <= overlap_end
+
+
 def fetch_repository_events(
     owner: str,
     project: str,
     headers: dict,
     verbosity: int = 1,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
 ) -> list:
     """
     Fetch all repository events using a combination of the GitHub Archive and
@@ -548,8 +627,51 @@ def fetch_repository_events(
     This fetches events like PushEvent, which group commits together naturally,
     providing a more concrete view of push activities compared to individual
     commit timeline events.
+
+    Args:
+        owner: Repository owner
+        project: Repository name
+        headers: HTTP headers for API requests
+        verbosity: Verbosity level for output
+        start_time: Start of time range to fetch events for
+        end_time: End of time range to fetch events for
+
+    Returns:
+        List of repository events from both GitHub Archive and REST API
     """
-    return fetch_repository_events_rest_api(owner, project, headers, verbosity)
+
+    # Always try to get events from GitHub Archive first
+
+    all_events = fetch_archived_repository_events(
+        owner, project, verbosity, start_time, end_time
+    )
+
+    if verbosity >= 2:
+        print(f"Got {len(all_events)} events from GitHub Archive")
+
+    # If the time range overlaps with the last 30 days, also fetch from REST API
+    if time_range_overlaps_last_30_days(start_time, end_time):
+        rest_api_events = fetch_repository_events_rest_api(
+            owner, project, headers, verbosity, start_time, end_time
+        )
+
+        # Merge events, avoiding duplicates based on event ID
+        existing_ids = {event.get("id") for event in all_events}
+        new_events = [
+            event for event in rest_api_events if event.get("id") not in existing_ids
+        ]
+        all_events.extend(new_events)
+
+        if verbosity >= 2:
+            print(
+                f"Got {len(rest_api_events)} events from REST API, "
+                f"{len(new_events)} were unique"
+            )
+
+    if verbosity >= 1:
+        print(f"Total events retrieved: {len(all_events)}")
+
+    return all_events
 
 
 def fetch_archived_repository_events(
@@ -568,7 +690,6 @@ def fetch_archived_repository_events(
     Args:
         owner: Repository owner (e.g., "PixarAnimationStudios")
         project: Repository name (e.g., "OpenUSD")
-        headers: GitHub API headers (not used for archive, but kept for compatibility)
         verbosity: Verbosity level for output
         start_time: Start of time range to fetch events for
         end_time: End of time range to fetch events for
@@ -598,48 +719,21 @@ def fetch_archived_repository_events(
         print(f"Time range: {start_time} to {end_time}")
         print(f"Archive months: {start_month} to {end_month}")
 
-    # Download archive data for the required months
-    downloaded_files = github_archive_repo_events.download_repo_events(
+    # Use get_repo_events to download and process all events
+    all_events = github_archive_repo_events.get_repo_events(
         repo_owner=owner,
         repo_name=project,
         start_month=start_month,
         end_month=end_month,
     )
 
-    # Collect events from downloaded files and filter by time range
-    all_events = []
-
-    for filepath in downloaded_files:
-        if verbosity >= 2:
-            print(f"Processing archive file: {os.path.basename(filepath)}")
-
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            events = data.get("events", [])
-
-            for event in events:
-                if start_time or end_time:
-                    event_time = parse_datetime_string(event["created_at"])
-
-                    # Filter by time range if specified
-                    if start_time and event_time < start_time:
-                        continue
-                    if end_time and event_time > end_time:
-                        continue
-
-                all_events.append(event)
-
-        except (json.JSONDecodeError, OSError) as e:
-            if verbosity >= 1:
-                print(f"Warning: Could not read archive file {filepath}: {e}")
-            raise
+    # Filter events by time range using common filtering function
+    filtered_events = filter_events_by_time_range(all_events, start_time, end_time)
 
     if verbosity >= 1:
-        print(f"Fetched {len(all_events)} events from GitHub Archive")
+        print(f"Fetched {len(filtered_events)} events from GitHub Archive")
 
-    return all_events
+    return filtered_events
 
 
 def fetch_repository_events_rest_api(
@@ -647,6 +741,8 @@ def fetch_repository_events_rest_api(
     project: str,
     headers: dict,
     verbosity: int = 1,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
 ) -> list:
     """
     Fetch all repository events using the GitHub Events API.
@@ -660,9 +756,11 @@ def fetch_repository_events_rest_api(
         project: Repository name
         headers: HTTP headers for API requests
         verbosity: Verbosity level for output
+        start_time: Start of time range to fetch events for
+        end_time: End of time range to fetch events for
 
     Returns:
-        List of repository events from the GitHub Events API
+        List of repository events from the GitHub Events API within the time range
     """
     events_url = f"https://api.github.com/repos/{owner}/{project}/events"
     all_events = []
@@ -714,9 +812,15 @@ def fetch_repository_events_rest_api(
     pbar.close()
 
     if verbosity >= 1:
-        print(f"Retrieved {len(all_events)} repository events")
+        print(f"Retrieved {len(all_events)} repository events from REST API")
 
-    return all_events
+    # Filter events by time range using common filtering function
+    filtered_events = filter_events_by_time_range(all_events, start_time, end_time)
+
+    if verbosity >= 1 and len(filtered_events) != len(all_events):
+        print(f"Filtered to {len(filtered_events)} events within time range")
+
+    return filtered_events
 
 
 def get_repository_push_events(
@@ -724,6 +828,8 @@ def get_repository_push_events(
     project: str,
     headers: dict,
     verbosity: int = 1,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
 ) -> dict:
     """
     Fetch repository events and extract PushEvents organized by ref.
@@ -733,12 +839,16 @@ def get_repository_push_events(
         project: Repository name
         headers: HTTP headers for API requests
         verbosity: Verbosity level for output
+        start_time: Start of time range to fetch events for
+        end_time: End of time range to fetch events for
 
     Returns:
         Dictionary mapping git refs to lists of PushEvent objects
     """
     # Fetch repository events first
-    repository_events = fetch_repository_events(owner, project, headers, verbosity)
+    repository_events = fetch_repository_events(
+        owner, project, headers, verbosity, start_time, end_time
+    )
 
     # Process repository events to extract PushEvents organized by ref
     push_events_by_ref = {}
@@ -1248,9 +1358,6 @@ def query_github_pr_pushes(
 
     print(f"Fetching PRs for {owner}/{project}...")
 
-    # Fetch and process repository events to extract PushEvents organized by ref
-    push_events_by_ref = get_repository_push_events(owner, project, headers, verbosity)
-
     # Process time filters once outside the loop
     start_dt = None
     end_dt = None
@@ -1258,6 +1365,11 @@ def query_github_pr_pushes(
         start_dt = parse_datetime_string(start_time)
     if end_time:
         end_dt = parse_datetime_string(end_time)
+
+    # Fetch and process repository events to extract PushEvents organized by ref
+    push_events_by_ref = get_repository_push_events(
+        owner, project, headers, verbosity, start_dt, end_dt
+    )
 
     # Use search API to get filtered PRs
     print("Using search API to get PRs within time range...")
