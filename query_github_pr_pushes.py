@@ -240,6 +240,8 @@ def get_api_call_type(url: str) -> str:
         return "timeline"
     elif "/events" in url and "/repos/" in url:
         return "repo-events"
+    elif "/pulls" in url and "/repos/" in url:
+        return "repo-pulls"
     else:
         # Unknown API call - we should handle all specific API types
         raise ValueError(f"Unknown API URL format for caching: {url}")
@@ -276,6 +278,14 @@ def get_cache_filename(url: str, params: dict | None = None) -> str:
     elif api_type == "repo-events":
         # Extract repo info from events URL
         # Format: /repos/{owner}/{project}/events
+        parts = url.split("/")
+        if len(parts) >= 5 and "repos" in url:
+            owner = parts[parts.index("repos") + 1]
+            project = parts[parts.index("repos") + 2]
+            repo_info = f"_repo-{owner}-{project}"
+    elif api_type == "repo-pulls":
+        # Extract repo info from pulls URL
+        # Format: /repos/{owner}/{project}/pulls
         parts = url.split("/")
         if len(parts) >= 5 and "repos" in url:
             owner = parts[parts.index("repos") + 1]
@@ -821,6 +831,105 @@ def fetch_repository_events_rest_api(
         print(f"Filtered to {len(filtered_events)} events within time range")
 
     return filtered_events
+
+
+def get_repository_pull_requests(
+    owner: str,
+    project: str,
+    headers: dict,
+    state: str = "all",
+    head: str | None = None,
+    base: str | None = None,
+    sort: str = "created",
+    direction: str = "desc",
+    per_page: int | None = None,
+    verbosity: int = 1,
+) -> list:
+    """
+    Fetch all pull requests for a repository using GitHub's REST API.
+
+    Uses the /repos/{owner}/{repo}/pulls endpoint to retrieve pull requests
+    with support for filtering by state, branches, and sorting options.
+
+    Args:
+        owner: Repository owner
+        project: Repository name
+        headers: HTTP headers for API requests
+        state: The state of the pull requests. Can be either 'open', 'closed', or 'all'
+        head: Filter pulls by head user or head organization and branch name in the format
+              'user:ref-name' or 'organization:ref-name'
+        base: Filter pulls by base branch name
+        sort: What to sort results by. Can be either 'created', 'updated', 'popularity'
+              (comment count) or 'long-running' (age, filtering by pulls updated in the last month)
+        direction: The direction of the sort. Can be either 'asc' or 'desc'
+        per_page: Results per page (max 100), defaults to DEFAULT_PER_PAGE
+        verbosity: Verbosity level for output
+
+    Returns:
+        List of pull request objects from the GitHub API
+    """
+    if per_page is None:
+        per_page = DEFAULT_PER_PAGE
+    pulls_url = f"https://api.github.com/repos/{owner}/{project}/pulls"
+    all_pulls = []
+    page = 1
+
+    if verbosity >= 1:
+        print(f"Fetching pull requests from {owner}/{project}...")
+
+    # Initialize progress bar for pulls pagination
+    pbar = tqdm(desc="Fetching pull requests", unit="pull")
+
+    while True:
+        params = {
+            "state": state,
+            "sort": sort,
+            "direction": direction,
+            "page": page,
+            "per_page": per_page,
+        }
+
+        # Add optional parameters if provided
+        if head is not None:
+            params["head"] = head
+        if base is not None:
+            params["base"] = base
+
+        # Make API call with caching
+        api_result = cached_api_call(pulls_url, headers, params, verbosity=verbosity)
+
+        if isinstance(api_result, FailedApiCall):
+            print(f"Error fetching pull requests: {api_result.error_message}")
+            break
+
+        pulls_data = api_result.data
+
+        if not pulls_data:
+            break
+
+        all_pulls.extend(pulls_data)
+
+        # Update progress bar
+        pbar.n = len(all_pulls)
+        pbar.set_description(f"Fetching pull requests ({len(all_pulls)} total)")
+        pbar.refresh()
+
+        # Check if we've reached the end of results
+        if len(pulls_data) < per_page:
+            break
+
+        page += 1
+
+    # Final update to show completion
+    pbar.n = len(all_pulls)
+    pbar.set_description(f"Fetched {len(all_pulls)} pull requests")
+    pbar.refresh()
+    pbar.close()
+
+    if verbosity >= 1:
+        print(f"Retrieved {len(all_pulls)} pull requests from REST API")
+
+    return all_pulls
 
 
 def get_repository_push_events(
