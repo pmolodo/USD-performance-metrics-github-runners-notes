@@ -234,9 +234,7 @@ def get_api_call_type(url: str) -> str:
     Raises:
         ValueError: If URL format is not recognized
     """
-    if "search/issues" in url:
-        return "search-issues"
-    elif "/timeline" in url:
+    if "/timeline" in url:
         return "timeline"
     elif "/events" in url and "/repos/" in url:
         return "repo-events"
@@ -1237,227 +1235,6 @@ def process_single_pr(
         )
 
 
-def build_pr_search_query(
-    owner: str,
-    project: str,
-    start_dt: datetime.datetime | None,
-    end_dt: datetime.datetime | None,
-    is_open: bool,
-) -> str:
-    """
-    Build GitHub search query to find PRs by state and time range.
-
-    Args:
-        owner: Repository owner
-        project: Repository name
-        start_dt: Optional start datetime for filtering
-        end_dt: Optional end datetime for filtering
-        is_open: True for open PRs, False for closed PRs
-
-    Returns:
-        GitHub search query string
-    """
-    # Base query components
-    query_parts = [f"repo:{owner}/{project}", "type:pr"]
-
-    # Format dates once
-    start_date = start_dt.strftime("%Y-%m-%d") if start_dt else None
-    end_date = end_dt.strftime("%Y-%m-%d") if end_dt else None
-
-    # State-specific logic
-    if is_open:
-        query_parts.append("is:open")
-    else:  # closed PRs
-        if start_date:
-            query_parts.append(f"closed:>={start_date}")
-        else:
-            query_parts.append("is:closed")
-
-    # Common start date filtering (updated constraint)
-    if start_date:
-        query_parts.append(f"updated:>={start_date}")
-
-    # Common end date filtering
-    if end_date:
-        query_parts.append(f"created:<={end_date}")
-
-    return " ".join(query_parts)
-
-
-def build_open_prs_query(
-    owner: str,
-    project: str,
-    start_dt: datetime.datetime | None,
-    end_dt: datetime.datetime | None,
-) -> str:
-    """Build GitHub search query to find open PRs."""
-    return build_pr_search_query(owner, project, start_dt, end_dt, True)
-
-
-def build_closed_prs_query(
-    owner: str,
-    project: str,
-    start_dt: datetime.datetime | None,
-    end_dt: datetime.datetime | None,
-) -> str:
-    """Build query to find closed PRs with activity after start_dt."""
-    return build_pr_search_query(owner, project, start_dt, end_dt, False)
-
-
-def search_prs_with_query(
-    query: str,
-    headers: dict,
-    query_type: str = "PRs",
-    max_results: int | None = None,
-    verbosity: int = 1,
-) -> list:
-    """Execute a single search query and return all paginated results."""
-    # Validate max_results is an int >= 0. If 0, exit immediately.
-    if max_results is not None:
-        if not isinstance(max_results, int) or max_results < 0:
-            raise ValueError("max_results must be an integer >= 0")
-        if max_results == 0:
-            return []
-
-    search_url = "https://api.github.com/search/issues"
-    all_prs = []
-    page = 1
-
-    # Initialize progress bar for search pagination
-    pbar = tqdm(desc=f"Searching {query_type}", unit="PR")
-    total_count = None
-
-    while True:
-        # Calculate per_page and remaining_results only if max_results is set
-        if max_results is None:
-            per_page = DEFAULT_PER_PAGE
-        else:
-            remaining_results = max_results - len(all_prs)
-            per_page = min(remaining_results, DEFAULT_PER_PAGE)
-
-        params = {
-            "q": query,
-            "page": page,
-            "per_page": per_page,
-            "sort": "created",
-            "order": "desc",
-        }
-
-        # Make API call with caching
-        api_result = cached_api_call(search_url, headers, params, verbosity=verbosity)
-
-        if isinstance(api_result, FailedApiCall):
-            print(f"Error in search API: {api_result.error_message}")
-            break
-
-        data = api_result.data
-        items = data.get("items", [])
-
-        # Get total count from first response to configure progress bar
-        if total_count is None:
-            total_count = data.get("total_count", 0)
-            if max_results is not None:
-                total_count = min(total_count, max_results)
-            pbar.total = total_count
-            pbar.set_description(f"Searching {query_type} (0/{total_count})")
-
-        if not items:
-            break
-
-        all_prs.extend(items)
-
-        # Update progress bar to show actual PR progress
-        pbar.n = len(all_prs)
-        desc = f"Searching {query_type} ({len(all_prs)}/{total_count})"
-        pbar.set_description(desc)
-        pbar.refresh()
-
-        if max_results is not None and len(all_prs) >= max_results:
-            all_prs = all_prs[:max_results]
-            break
-
-        # Check if we've got all results
-        if len(items) < per_page:
-            break
-
-        page += 1
-
-    # Final update to show completion and leave visible
-    pbar.n = len(all_prs)
-    pbar.set_description(f"Found {len(all_prs)} {query_type}")
-    pbar.refresh()
-    # Don't close the progress bar - leave it visible
-    return all_prs
-
-
-def search_filtered_prs(
-    owner: str,
-    project: str,
-    headers: dict,
-    start_dt: datetime.datetime | None,
-    end_dt: datetime.datetime | None,
-    max_prs: int | None = None,
-    verbosity: int = 1,
-):
-    """Use search API to get PRs filtered by time range.
-
-    Makes two separate queries (open PRs and closed PRs) since GitHub's
-    issue search API doesn't support OR operators with parentheses.
-    """
-    # Build separate queries for open and closed PRs
-    open_query = build_open_prs_query(owner, project, start_dt, end_dt)
-    closed_query = build_closed_prs_query(owner, project, start_dt, end_dt)
-
-    print(f"Open PRs query: {open_query}")
-    print(f"Closed PRs query: {closed_query}")
-
-    # If max_prs is specified, we need to split between queries intelligently
-    # We'll start with open PRs, then get closed PRs up to remaining limit
-    remaining_limit = max_prs
-
-    # Execute open PRs query first
-    open_prs = search_prs_with_query(
-        open_query,
-        headers,
-        "open PRs",
-        max_results=remaining_limit,
-        verbosity=verbosity,
-    )
-
-    # Update remaining limit for closed PRs
-    if remaining_limit is not None:
-        remaining_limit -= len(open_prs)
-
-    # Execute closed PRs query with remaining limit
-    closed_prs = []
-    if remaining_limit is None or remaining_limit > 0:
-        closed_prs = search_prs_with_query(
-            closed_query,
-            headers,
-            "closed PRs",
-            max_results=remaining_limit,
-            verbosity=verbosity,
-        )
-
-    print(f"Found {len(open_prs)} open PRs and {len(closed_prs)} closed PRs")
-
-    # Combine results and remove duplicates (shouldn't be any, but be safe)
-    all_prs = open_prs + closed_prs
-    seen_pr_numbers = set()
-    unique_prs = []
-
-    for pr in all_prs:
-        pr_number = pr.get("number")
-        if pr_number not in seen_pr_numbers:
-            seen_pr_numbers.add(pr_number)
-            unique_prs.append(pr)
-        else:
-            print(f"Warning: Duplicate PR #{pr_number} found and removed")
-
-    print(f"Total unique PRs: {len(unique_prs)}")
-    return unique_prs
-
-
 def query_github_pr_pushes(
     owner: str,
     project: str,
@@ -1515,20 +1292,25 @@ def query_github_pr_pushes(
     if end_time:
         end_dt = parse_datetime_string(end_time)
 
+    print("Gathering PRs...")
+    filtered_prs = get_repository_pull_requests(
+        owner=owner,
+        project=project,
+        headers=headers,
+        start_time=start_dt,
+        end_time=end_dt,
+        max_prs=max_prs,
+        verbosity=verbosity,
+    )
+
+    if not filtered_prs:
+        print("No PRs found matching the specified criteria.")
+        return
+
     # Fetch and process repository events to extract PushEvents organized by ref
     push_events_by_ref = get_repository_push_events(
         owner, project, headers, verbosity, start_dt, end_dt
     )
-
-    # Use search API to get filtered PRs
-    print("Using search API to get PRs within time range...")
-    filtered_prs = search_filtered_prs(
-        owner, project, headers, start_dt, end_dt, max_prs, verbosity
-    )
-
-    if not filtered_prs:
-        print("No PRs found matching the search criteria.")
-        return
 
     print(f"Found {len(filtered_prs)} PRs matching criteria")
 
