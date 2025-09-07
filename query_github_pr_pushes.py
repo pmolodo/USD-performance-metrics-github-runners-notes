@@ -970,6 +970,91 @@ def get_repository_pull_requests(
     return all_pulls
 
 
+def group_prs_by_head_ref(filtered_prs: list) -> dict:
+    """
+    Group pull requests by their head repository and branch reference.
+
+    Args:
+        filtered_prs: List of PR objects from get_repository_pull_requests
+
+    Returns:
+        Dict with three-level nesting: owner -> repo -> ref -> list of PR numbers.
+        Structure: {
+            "owner1": {
+                "repo1": {
+                    "branch_name": [pr_number1, pr_number2, ...]
+                }
+            }
+        }
+
+        For PRs from forks (where head.repo is null), uses the fork owner's username
+        as the owner and "fork" as the repository name.
+    """
+    owner_repo_ref_map = {}
+
+    for pr in filtered_prs:
+        pr_number = pr.get("number")
+        if pr_number is None:
+            raise ValueError(
+                "PR missing required 'number' field. This indicates corrupted GitHub"
+                " API data."
+            )
+
+        head_info = pr.get("head")
+        if not head_info:
+            raise ValueError(
+                f"PR #{pr_number}: missing required 'head' field. This indicates"
+                " corrupted GitHub API data."
+            )
+
+        ref = head_info.get("ref")
+        if not ref:
+            raise ValueError(
+                f"PR #{pr_number}: missing required 'head.ref' field. This indicates"
+                " corrupted GitHub API data."
+            )
+
+        # Determine owner and repository
+        head_repo = head_info.get("repo")
+        if head_repo is None:
+            # Skip PRs with null repo (deleted or private fork repositories)
+            head_user = head_info.get("user")
+            user_login = head_user.get("login") if head_user else "unknown"
+            print(
+                f"Warning: Skipping PR #{pr_number} - fork repository from user"
+                f" '{user_login}' is deleted or private"
+            )
+            continue
+
+        # If repo exists, it should always have full_name
+        full_name = head_repo.get("full_name")
+        if not full_name:
+            raise ValueError(
+                f"PR #{pr_number}: repository exists but missing full_name. "
+                "This indicates corrupted or unexpected GitHub API data."
+            )
+
+        # Parse full repository name: "owner/repo"
+        if "/" in full_name:
+            owner, repo = full_name.split("/", 1)
+        else:
+            raise ValueError(
+                f"PR #{pr_number}: repository full_name '{full_name}' does not contain"
+                " '/'. Expected format is 'owner/repo'. This indicates unexpected"
+                " GitHub API data."
+            )
+
+        # Initialize three-level nested dict structure if needed
+        repo_ref_map = owner_repo_ref_map.setdefault(owner, {})
+        ref_map = repo_ref_map.setdefault(repo, {})
+        pr_list = ref_map.setdefault(ref, [])
+
+        # Add PR number to the list
+        pr_list.append(pr_number)
+
+    return owner_repo_ref_map
+
+
 def get_repository_push_events(
     owner: str,
     project: str,
