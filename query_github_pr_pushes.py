@@ -843,13 +843,16 @@ def get_repository_pull_requests(
     sort: str = "created",
     direction: str = "desc",
     per_page: int | None = None,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
+    max_prs: int | None = None,
     verbosity: int = 1,
 ) -> list:
     """
     Fetch all pull requests for a repository using GitHub's REST API.
 
     Uses the /repos/{owner}/{repo}/pulls endpoint to retrieve pull requests
-    with support for filtering by state, branches, and sorting options.
+    with support for filtering by state, branches, sorting options, and time ranges.
 
     Args:
         owner: Repository owner
@@ -863,11 +866,21 @@ def get_repository_pull_requests(
               (comment count) or 'long-running' (age, filtering by pulls updated in the last month)
         direction: The direction of the sort. Can be either 'asc' or 'desc'
         per_page: Results per page (max 100), defaults to DEFAULT_PER_PAGE
+        start_time: Optional start time filter (filters by created_at field)
+        end_time: Optional end time filter (filters by created_at field)
+        max_prs: Optional maximum number of PRs to return
         verbosity: Verbosity level for output
 
     Returns:
-        List of pull request objects from the GitHub API
+        List of pull request objects from the GitHub API, filtered by time range if specified
     """
+    # Validate max_prs is an int >= 0. If 0, exit immediately.
+    if max_prs is not None:
+        if not isinstance(max_prs, int) or max_prs < 0:
+            raise ValueError("max_prs must be an integer >= 0")
+        if max_prs == 0:
+            return []
+
     if per_page is None:
         per_page = DEFAULT_PER_PAGE
     pulls_url = f"https://api.github.com/repos/{owner}/{project}/pulls"
@@ -881,12 +894,19 @@ def get_repository_pull_requests(
     pbar = tqdm(desc="Fetching pull requests", unit="pull")
 
     while True:
+        # Calculate per_page and remaining_results only if max_prs is set
+        if max_prs is None:
+            current_per_page = per_page
+        else:
+            remaining_results = max_prs - len(all_pulls)
+            current_per_page = min(remaining_results, per_page)
+
         params = {
             "state": state,
             "sort": sort,
             "direction": direction,
             "page": page,
-            "per_page": per_page,
+            "per_page": current_per_page,
         }
 
         # Add optional parameters if provided
@@ -907,15 +927,35 @@ def get_repository_pull_requests(
         if not pulls_data:
             break
 
+        # Filter pulls by time range if specified
+        if start_time is not None or end_time is not None:
+            filtered_pulls = []
+            for pull in pulls_data:
+                created_at_str = pull.get("created_at")
+                if created_at_str:
+                    created_at = parse_datetime_string(created_at_str)
+                    if is_timestamp_in_range(created_at, start_time, end_time):
+                        filtered_pulls.append(pull)
+            pulls_data = filtered_pulls
+
         all_pulls.extend(pulls_data)
 
         # Update progress bar
         pbar.n = len(all_pulls)
-        pbar.set_description(f"Fetching pull requests ({len(all_pulls)} total)")
+        desc = f"Fetching pull requests ({len(all_pulls)} total"
+        if max_prs is not None:
+            desc += f"/{max_prs}"
+        desc += ")"
+        pbar.set_description(desc)
         pbar.refresh()
 
+        # Check if we've reached max_prs limit
+        if max_prs is not None and len(all_pulls) >= max_prs:
+            all_pulls = all_pulls[:max_prs]
+            break
+
         # Check if we've reached the end of results
-        if len(pulls_data) < per_page:
+        if len(pulls_data) < current_per_page:
             break
 
         page += 1
