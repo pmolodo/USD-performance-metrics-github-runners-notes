@@ -1,21 +1,25 @@
 #!/usr/bin/env python
 
-"""Download historical event data from the GitHub Archive for a given repository.
+"""Download historical event data from the GitHub Archive for given repositories.
 
 Downloads data in per-month chunks, which are saved to a local directory.
+Multiple repositories can be processed in a single BigQuery call for efficiency.
 
 Usage examples:
     # Download current month's data for OpenUSD
-    python3 github_archive_repo_events.py PixarAnimationStudios OpenUSD
+    python3 github_archive_repo_events.py PixarAnimationStudios/OpenUSD
+
+    # Download for multiple repositories
+    python3 github_archive_repo_events.py PixarAnimationStudios/OpenUSD microsoft/TypeScript
 
     # Download July 2025 data
-    python3 github_archive_repo_events.py PixarAnimationStudios OpenUSD --start-month 2025-07 --end-month 2025-07
+    python3 github_archive_repo_events.py PixarAnimationStudios/OpenUSD --start-month 2025-07 --end-month 2025-07
 
     # Download data from July 2025 to September 2025
-    python3 github_archive_repo_events.py PixarAnimationStudios OpenUSD --start-month 2025-07 --end-month 2025-09
+    python3 github_archive_repo_events.py PixarAnimationStudios/OpenUSD --start-month 2025-07 --end-month 2025-09
 
     # Download to custom directory
-    python3 github_archive_repo_events.py PixarAnimationStudios OpenUSD --output-dir my_data
+    python3 github_archive_repo_events.py PixarAnimationStudios/OpenUSD --output-dir my_data
 
 Note: This script requires Google Cloud credentials and BigQuery access.
 Set up Application Default Credentials with: gcloud auth application-default login
@@ -29,6 +33,8 @@ import json
 import os
 import sys
 import traceback
+
+from collections.abc import Iterable
 
 from google.cloud import bigquery
 
@@ -278,9 +284,47 @@ def get_repo_events_month_query(repo_owner: str, repo_name: str, month: Month) -
     return query
 
 
+def get_multi_repo_events_month_query(repos: Iterable[str], month: Month) -> str:
+    """
+    Generate SQL query for all repo events for multiple repos and a given month.
+
+    Args:
+        repos: Iterable of repository full names in 'owner/repo' format
+        month: Month to query
+
+    Returns:
+        str: SQL query string for BigQuery
+    """
+    if month < EARLIEST_ARCHIVE_MONTH:
+        raise ValueError(
+            f"Github Archive data only available starting on {EARLIEST_ARCHIVE_MONTH}"
+        )
+    elif month > CURRENT_MONTH:
+        raise ValueError(
+            f"Github Archive data only available up to current month (got: {month})"
+        )
+
+    table = get_github_archive_month_table_name(month)
+
+    # Build WHERE clause for multiple repos
+    repo_conditions = []
+    for repo in repos:
+        repo_conditions.append(f"repo.name = '{repo}'")
+
+    where_clause = " OR ".join(repo_conditions)
+
+    query = f"""
+    SELECT *
+    FROM `{table}`
+    WHERE
+        ({where_clause})
+    """
+
+    return query
+
+
 def download_repo_events(
-    repo_owner: str,
-    repo_name: str,
+    repos: list[str],
     start_month: Month | None = None,
     end_month: Month | None = None,
     output_dir: str = DEFAULT_OUTPUT_DIR,
@@ -291,8 +335,7 @@ def download_repo_events(
     Download repository events from GitHub Archive for the given date range.
 
     Args:
-        repo_owner: Repository owner (e.g., "PixarAnimationStudios")
-        repo_name: Repository name (e.g., "OpenUSD")
+        repos: List of repository full names in 'owner/repo' format (e.g., ["PixarAnimationStudios/OpenUSD"])
         start_month: Start month (defaults to current month if None)
         end_month: End month (defaults to current month if None)
         output_dir: Directory to save downloaded files
@@ -304,6 +347,19 @@ def download_repo_events(
             they were downloaded or already existed); note that the size may be less
             than the number of months if the user cancelled or there were errors.
     """
+
+    # Validate repository format
+    for repo in repos:
+        if "/" not in repo:
+            raise ValueError(f"Repository '{repo}' is not in 'owner/repo' format")
+        if repo.count("/") != 1:
+            raise ValueError(
+                f"Repository '{repo}' should contain exactly one '/'. Got:"
+                f" {repo.count('/')}"
+            )
+        owner, name = repo.split("/", 1)
+        if not owner or not name:
+            raise ValueError(f"Repository '{repo}' has empty owner or name component")
 
     # Set default months if not provided
     if start_month is None:
@@ -330,46 +386,63 @@ def download_repo_events(
 
     if fix_existing_files:
         print(
-            f"Planning to process {len(months_to_process)} months of files for"
-            f" {repo_owner}/{repo_name} (download new + fix existing)"
+            f"Scanning and fixing existing files for {len(repos)} repositories in"
+            f" {output_dir}..."
         )
+        total_fixed = fix_existing_json_files(output_dir)
+        print(f"Fixed {total_fixed} files")
+        return []
+
+    if len(months_to_process) == 1:
+        print(f"Planning to download 1 month of data for {len(repos)} repositories")
     else:
         print(
             f"Planning to download {len(months_to_process)} months of data for"
-            f" {repo_owner}/{repo_name}"
+            f" {len(repos)} repositories"
         )
+
+    print(f"Repositories: {', '.join(repos)}")
     print(f"Month range: {start_month} to {end_month}")
     print(f"Output directory: {output_dir}")
     print()
 
     # Check for existing files and build queries for missing ones
-    queries = []
+    # Structure: queries[(month)] = (repos_needed_for_month, query, bytes_processed, filepaths_by_repo)
+    queries = {}
     existing_files = []
     total_bytes = 0
 
     print(
         "Checking for existing files and estimating bytes scanned for missing ones..."
     )
-    for month in months_to_process:
-        # Create filename to check if it already exists
-        filename = f"{repo_owner}_{repo_name}_{month}.json"
-        filepath = os.path.join(output_dir, filename)
 
-        if os.path.exists(filepath):
-            print(f"  {month}: File already exists, skipping")
-            existing_files.append(filepath)
-        else:
-            # File doesn't exist, need to query for it
-            query = get_repo_events_month_query(repo_owner, repo_name, month)
+    for month in months_to_process:
+        filepaths_by_repo = {}  # Only store repos that need downloading
+
+        # Check each repo for this month
+        for repo in repos:
+            owner, name = repo.split("/", 1)
+            filename = f"{owner}_{name}_{month}.json"
+            filepath = os.path.join(output_dir, filename)
+
+            if os.path.exists(filepath):
+                existing_files.append(filepath)
+                print(f"  {month} {repo}: File already exists, skipping")
+            else:
+                filepaths_by_repo[repo] = filepath  # Only store if needs downloading
+
+        # If we need to query for any repos this month, create a single batched query
+        if filepaths_by_repo:  # Check if any repos need downloading
+            query = get_multi_repo_events_month_query(filepaths_by_repo, month)
             try:
                 bytes_processed = check_query_bytes_processed(
                     query, credentials_file_pattern
                 )
-                queries.append((month, query, bytes_processed, filepath))
+                queries[month] = (query, bytes_processed, filepaths_by_repo)
                 total_bytes += bytes_processed
                 print(
-                    f"  {month}: {bytes_processed:,} bytes"
-                    f" ({bytes_processed/1024**3:.3f} GB)"
+                    f"  {month}: {len(filepaths_by_repo)} repos,"
+                    f" {bytes_processed:,} bytes ({bytes_processed/1024**3:.3f} GB)"
                 )
             except Exception as e:
                 print(f"  {month}: Error estimating bytes scanned - {e}")
@@ -378,11 +451,19 @@ def download_repo_events(
     total_gb = total_bytes / (1024**3)
     total_tb = total_gb / 1024
 
-    if len(queries) + len(existing_files) != len(months_to_process):
+    # Validate that we accounted for all repo/month combinations
+    total_expected_files = len(months_to_process) * len(repos)
+    total_actual_files = len(existing_files)
+    for month_data in queries.values():
+        _, _, filepaths_by_repo = month_data
+        total_actual_files += len(filepaths_by_repo)
+
+    if total_actual_files != total_expected_files:
         raise AssertionError(
-            f"Number of queries ({len(queries)}) + number of existing files"
-            f" ({len(existing_files)}) != number of months to process"
-            f" ({len(months_to_process)})"
+            f"Expected {total_expected_files} total files"
+            f" ({len(months_to_process)} months × {len(repos)} repos), but accounted"
+            f" for {total_actual_files} files ({len(existing_files)} existing +"
+            f" {total_actual_files - len(existing_files)} to download)"
         )
 
     # Summary of what needs to be done
@@ -434,18 +515,24 @@ def download_repo_events(
     if len(queries) > 0:
         print()
         print("Starting downloads...")
-        for i, (month, query, estimated_bytes, filepath) in enumerate(queries, 1):
-            print(f"[{i}/{len(queries)}] Downloading {month}...")
+        for i, (month, (query, estimated_bytes, filepaths_by_repo)) in enumerate(
+            queries.items(), 1
+        ):
+            print(
+                f"[{i}/{len(queries)}] Downloading {month} for"
+                f" {len(filepaths_by_repo)} repos..."
+            )
 
             # Only create BigQuery client when we actually need to download data
             client = get_bigquery_client(credentials_file_pattern)
 
-            # Execute query
+            # Execute single query for all repos this month
             query_job = client.query(query)
             results = query_job.result()
 
-            # Convert to list of dictionaries
-            events = []
+            # Group events by repository
+            events_by_repo = {repo: [] for repo in filepaths_by_repo}
+
             for row in results:
                 # Convert row to dictionary (all columns from GitHub Archive)
                 event_dict = dict(row)
@@ -457,28 +544,36 @@ def download_repo_events(
                 # Parse JSON fields (payload and other)
                 decode_json_fields(event_dict)
 
-                events.append(event_dict)
+                # Determine which repo this event belongs to
+                repo_name = event_dict.get("repo", {}).get("name")
+                if repo_name in events_by_repo:
+                    events_by_repo[repo_name].append(event_dict)
 
-            # Save to file (filepath is already computed)
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "repo_owner": repo_owner,
-                        "repo_name": repo_name,
-                        "year": month.year,
-                        "month": month.month,
-                        "download_time": datetime.datetime.now().isoformat(),
-                        "event_count": len(events),
-                        "estimated_bytes_processed": estimated_bytes,
-                        "actual_bytes_processed": query_job.total_bytes_processed,
-                        "events": events,
-                    },
-                    f,
-                    indent=2,
-                )
+            # Save separate files for each repo
+            for repo in filepaths_by_repo:
+                owner, name = repo.split("/", 1)
+                filepath = filepaths_by_repo[repo]
+                events = events_by_repo[repo]
 
-            downloaded_files.append(filepath)
-            print(f"  Saved {len(events)} events to {filepath}")
+                print(f"    Saving {repo}: {len(events)} events -> {filepath}")
+
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "repo_owner": owner,
+                            "repo_name": name,
+                            "year": month.year,
+                            "month": month.month,
+                            "download_time": datetime.datetime.now().isoformat(),
+                            "event_count": len(events),
+                            "estimated_bytes_processed": estimated_bytes,
+                            "actual_bytes_processed": query_job.total_bytes_processed,
+                            "events": events,
+                        },
+                        f,
+                        indent=2,
+                    )
+                downloaded_files.append(filepath)
 
     # Fix existing files if requested
     if fix_existing_files and len(existing_files) > 0:
@@ -596,13 +691,12 @@ def get_parser():
     )
 
     parser.add_argument(
-        "repo_owner",
-        help="Repository owner (e.g., 'PixarAnimationStudios')",
-    )
-
-    parser.add_argument(
-        "repo_name",
-        help="Repository name (e.g., 'OpenUSD')",
+        "repos",
+        nargs="+",
+        help=(
+            "Repository full names in 'owner/repo' format (e.g.,"
+            " 'PixarAnimationStudios/OpenUSD'). Multiple repos can be specified."
+        ),
     )
 
     parser.add_argument(
@@ -690,8 +784,7 @@ def main(argv=None):
 
         # Call the main function (handles both download and fix operations)
         download_repo_events(
-            repo_owner=args.repo_owner,
-            repo_name=args.repo_name,
+            repos=args.repos,
             start_month=start_month,
             end_month=end_month,
             output_dir=args.output_dir,
