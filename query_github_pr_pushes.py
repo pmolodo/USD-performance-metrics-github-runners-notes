@@ -13,6 +13,7 @@ import time
 import traceback
 
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1055,6 +1056,75 @@ def group_prs_by_head_ref(filtered_prs: list) -> dict:
     return owner_repo_ref_map
 
 
+def get_pr_push_events(
+    repo_refs: dict[str, dict[str, Iterable[str]]],
+    headers: dict,
+    verbosity: int = 1,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
+) -> dict:
+    """
+    Fetch push events for all repositories and filter to only include specified refs.
+
+    Args:
+        repo_refs: Two-level nested dict: owner -> repo -> iterable of ref names
+        headers: HTTP headers for API requests
+        verbosity: Verbosity level for output
+        start_time: Start of time range to fetch events for
+        end_time: End of time range to fetch events for
+
+    Returns:
+        Three-level nested dict: owner -> repo -> ref -> list of PushEvent objects,
+        filtered to only include refs that appear in the input mapping
+    """
+    aggregated_push_events = {}
+    total_repos = 0
+    total_events = 0
+
+    for owner, repos in repo_refs.items():
+        repo_events = aggregated_push_events.setdefault(owner, {})
+
+        for repo, ref_names in repos.items():
+            ref_events = repo_events.setdefault(repo, {})
+            repo_id = f"{owner}/{repo}"
+
+            # Convert ref names to set for efficient lookups
+            target_refs = set(ref_names)
+
+            if verbosity >= 2:
+                print(f"  Processing {repo_id} with {len(target_refs)} refs...")
+
+            # Fetch push events for this repository
+            repo_push_events = get_repository_push_events(
+                owner,
+                repo,
+                headers,
+                verbosity=max(0, verbosity - 1),
+                start_time=start_time,
+                end_time=end_time,
+            )
+
+            # Process each requested ref to ensure all appear in output
+            for ref_name in ref_names:
+                # Convert short ref name to full format for lookup
+                full_ref = f"refs/heads/{ref_name}"
+                events = repo_push_events.get(full_ref, [])
+
+                # Use short ref name in output to match input format
+                ref_events[ref_name] = events
+                total_events += len(events)
+
+                if verbosity >= 3:
+                    print(f"    Added {len(events)} push events for ref {ref_name}")
+
+            total_repos += 1
+
+    if verbosity >= 1:
+        print(f"Aggregated {total_events} push events from {total_repos} repositories")
+
+    return aggregated_push_events
+
+
 def get_repository_push_events(
     owner: str,
     project: str,
@@ -1168,6 +1238,28 @@ def get_event_time(event: dict) -> datetime.datetime:
     return parse_datetime_string(get_event_time_str(event))
 
 
+def get_pr_push_events_list(pr_item: dict, push_events_by_ref: dict) -> list:
+    """
+    Extract push events for a specific PR from the structured push events data.
+
+    Args:
+        pr_item: PR object from GitHub API (assumes repo exists - nulls filtered earlier)
+        push_events_by_ref: Three-level nested dict: owner -> repo -> ref -> PushEvent lists
+
+    Returns:
+        List of push events for this PR's head ref, or empty list if not found
+    """
+    head_info = pr_item["head"]
+    ref = head_info["ref"]
+
+    # Extract head repository owner and name (repo guaranteed to exist)
+    repo_info = head_info["repo"]
+    owner, repo_name = repo_info["full_name"].split("/", 1)
+
+    # Navigate the 3-level structure to get the events
+    return push_events_by_ref.get(owner, {}).get(repo_name, {}).get(ref, [])
+
+
 def process_single_pr(
     task: PRTask,
     headers: dict,
@@ -1175,7 +1267,7 @@ def process_single_pr(
     project: str,
     start_dt: datetime.datetime | None,
     end_dt: datetime.datetime | None,
-    push_events_by_ref: dict,
+    push_events: list,
     verbosity: int = 1,
 ) -> ProcessedPr | FailedPr:
     """Process a single PR to extract timeline data.
@@ -1187,7 +1279,7 @@ def process_single_pr(
         project: Repository name
         start_dt: Optional start datetime filter
         end_dt: Optional end datetime filter
-        push_events_by_ref: Dictionary mapping git refs to PushEvent lists
+        push_events: List of push events for this PR's head ref
         verbosity: Verbosity level for output
 
     Returns:
@@ -1198,13 +1290,7 @@ def process_single_pr(
 
     try:
         # Get PR creation time (always included)
-        pr_created_str = pr_item.get("created_at")
-        if not pr_created_str:
-            return FailedPr(
-                pr_number=pr_number,
-                error_message="No creation timestamp found",
-                api_call_made=False,
-            )
+        pr_created_str = pr_item["created_at"]
 
         pr_created = parse_datetime_string(pr_created_str)
 
@@ -1242,7 +1328,7 @@ def process_single_pr(
         timeline_events = api_result.data
         if timeline_events:  # Ensure timeline_events is not None
             for event in timeline_events:
-                event_type = event.get("event")
+                event_type = event["event"]
                 if event_type in [
                     "head_ref_force_pushed",
                     "head_ref_restored",
@@ -1273,36 +1359,27 @@ def process_single_pr(
 
                     events.append(event_data)
 
-        # Process push events from repository events API
-        # Get the PR's head branch reference
-        head_ref = pr_item.get("head", {}).get("ref")
-        if head_ref:
-            # Construct the full ref name (GitHub API uses refs/heads/branch_name format)
-            full_head_ref = f"refs/heads/{head_ref}"
+        # Process push events for this PR
+        for push_event in push_events:
+            push_time_str = push_event["created_at"]
+            push_time = parse_datetime_string(push_time_str)
+            if is_timestamp_in_range(push_time, start_dt, end_dt):
+                push_data = {
+                    "event": "push",
+                    "time": push_time.isoformat(),
+                }
 
-            # Look for push events on this branch
-            if full_head_ref in push_events_by_ref:
-                for push_event in push_events_by_ref[full_head_ref]:
-                    push_time_str = push_event.get("created_at")
-                    if push_time_str:
-                        push_time = parse_datetime_string(push_time_str)
-                        if is_timestamp_in_range(push_time, start_dt, end_dt):
-                            push_data = {
-                                "event": "push",
-                                "time": push_time.isoformat(),
-                            }
+                # Add commit info if available
+                payload = push_event["payload"]
+                commits = payload.get("commits", [])
+                if commits:
+                    push_data["commit_count"] = str(len(commits))
+                    # Add the head commit sha
+                    head_commit = payload.get("head")
+                    if head_commit:
+                        push_data["commit_id"] = head_commit
 
-                            # Add commit info if available
-                            payload = push_event.get("payload", {})
-                            commits = payload.get("commits", [])
-                            if commits:
-                                push_data["commit_count"] = str(len(commits))
-                                # Add the head commit sha
-                                head_commit = payload.get("head")
-                                if head_commit:
-                                    push_data["commit_id"] = head_commit
-
-                            events.append(push_data)
+                events.append(push_data)
 
         # Return successful result
         return ProcessedPr(
@@ -1392,9 +1469,11 @@ def query_github_pr_pushes(
         print("No PRs found matching the specified criteria.")
         return
 
+    prs_by_repo_ref = group_prs_by_head_ref(filtered_prs)
+
     # Fetch and process repository events to extract PushEvents organized by ref
-    push_events_by_ref = get_repository_push_events(
-        owner, project, headers, verbosity, start_dt, end_dt
+    push_events_by_ref = get_pr_push_events(
+        prs_by_repo_ref, headers, verbosity, start_dt, end_dt
     )
 
     print(f"Found {len(filtered_prs)} PRs matching criteria")
@@ -1423,6 +1502,9 @@ def query_github_pr_pushes(
     while active_pr_tasks:
         task = active_pr_tasks.popleft()
 
+        # Get push events for this specific PR
+        pr_push_events = get_pr_push_events_list(task.pr_item, push_events_by_ref)
+
         # Process the PR and get result
         result = process_single_pr(
             task,
@@ -1431,7 +1513,7 @@ def query_github_pr_pushes(
             project,
             start_dt,
             end_dt,
-            push_events_by_ref,
+            pr_push_events,
             verbosity,
         )
 
