@@ -123,6 +123,42 @@ def get_bigquery_client(credentials_file_pattern=None):
     return _bigquery_client
 
 
+def validate_repo_format(repo: str):
+    """
+    Validate that a repository name is in the correct 'owner/repo' format.
+
+    Args:
+        repo: Repository name to validate
+
+    Raises:
+        ValueError: If the repository format is invalid
+    """
+    if "/" not in repo:
+        raise ValueError(f"Repository '{repo}' is not in 'owner/repo' format")
+    if repo.count("/") != 1:
+        raise ValueError(
+            f"Repository '{repo}' should contain exactly one '/'. Got:"
+            f" {repo.count('/')}"
+        )
+    owner, name = repo.split("/", 1)
+    if not owner or not name:
+        raise ValueError(f"Repository '{repo}' has empty owner or name component")
+
+
+def validate_repos_format(repos: list[str]):
+    """
+    Validate that all repository names are in the correct 'owner/repo' format.
+
+    Args:
+        repos: List of repository names to validate
+
+    Raises:
+        ValueError: If any repository format is invalid
+    """
+    for repo in repos:
+        validate_repo_format(repo)
+
+
 def decode_json_fields(event_dict):
     """
     Decode JSON string fields (payload and other) in an event dictionary.
@@ -349,17 +385,7 @@ def download_repo_events(
     """
 
     # Validate repository format
-    for repo in repos:
-        if "/" not in repo:
-            raise ValueError(f"Repository '{repo}' is not in 'owner/repo' format")
-        if repo.count("/") != 1:
-            raise ValueError(
-                f"Repository '{repo}' should contain exactly one '/'. Got:"
-                f" {repo.count('/')}"
-            )
-        owner, name = repo.split("/", 1)
-        if not owner or not name:
-            raise ValueError(f"Repository '{repo}' has empty owner or name component")
+    validate_repos_format(repos)
 
     # Set default months if not provided
     if start_month is None:
@@ -628,23 +654,21 @@ def download_repo_events(
 
 
 def get_repo_events(
-    repo_owner: str,
-    repo_name: str,
+    repos: list[str],
     start_month: Month | None = None,
     end_month: Month | None = None,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     fix_existing_files: bool = False,
     credentials_file_pattern: str | None = None,
-):
+) -> dict[str, list]:
     """
-    Get repository events by first downloading them and then reading all files.
+    Get repository events for multiple repositories by first downloading them and then reading all files.
 
     This function combines download_repo_events and read_repo_events to provide
-    a convenient way to get all events as a flattened list.
+    a convenient way to get all events organized by repository.
 
     Args:
-        repo_owner: Repository owner (e.g., "PixarAnimationStudios")
-        repo_name: Repository name (e.g., "OpenUSD")
+        repos: List of repository full names in 'owner/repo' format (e.g., ["PixarAnimationStudios/OpenUSD"])
         start_month: Start month (defaults to current month if None)
         end_month: End month (defaults to current month if None)
         output_dir: Directory to save downloaded files
@@ -652,12 +676,14 @@ def get_repo_events(
         credentials_file_pattern: Optional credentials file pattern to use
 
     Returns:
-        list: Flattened list of all events from all months in the date range
+        dict: Dictionary mapping repository full names to lists of events
     """
-    # First, download the repo events data
+    # Validate repository format
+    validate_repos_format(repos)
+
+    # First, download the repo events data for all repositories
     file_paths = download_repo_events(
-        repo_owner=repo_owner,
-        repo_name=repo_name,
+        repos=repos,
         start_month=start_month,
         end_month=end_month,
         output_dir=output_dir,
@@ -665,18 +691,23 @@ def get_repo_events(
         credentials_file_pattern=credentials_file_pattern,
     )
 
-    # Then read events from all files and flatten into a single list
-    all_events = []
+    # Then read events from all files and organize by repository
+    events_by_repo = {repo: [] for repo in repos}
 
     for file_path in file_paths:
         # Read events from this file
         data = read_repo_events(file_path)
 
-        # Extract events and add to the flattened list
-        if "events" in data:
-            all_events.extend(data["events"])
+        # Extract repo information from file data
+        repo_owner = data["repo_owner"]
+        repo_name = data["repo_name"]
+        repo_full_name = f"{repo_owner}/{repo_name}"
 
-    return all_events
+        # Extract events and add to the appropriate repository
+        if "events" in data and repo_full_name in events_by_repo:
+            events_by_repo[repo_full_name].extend(data["events"])
+
+    return events_by_repo
 
 
 ###############################################################################
