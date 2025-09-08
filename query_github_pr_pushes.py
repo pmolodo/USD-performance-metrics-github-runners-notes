@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from turtle import pu
 
 import requests
 
@@ -942,7 +943,10 @@ def get_repository_pull_requests(
         pulls_data = api_result.data
 
         if not pulls_data:
-            break
+            raise ValueError("api call result missing data")
+
+        num_api_results = len(pulls_data)
+        print(f"Fetched {num_api_results} pull requests from API")
 
         # Filter pulls by time range if specified
         if start_time is not None or end_time is not None:
@@ -969,10 +973,15 @@ def get_repository_pull_requests(
         # Check if we've reached max_prs limit
         if max_prs is not None and len(all_pulls) >= max_prs:
             all_pulls = all_pulls[:max_prs]
+            print(f"Reached max_prs limit: {max_prs}")
             break
 
         # Check if we've reached the end of results
-        if len(pulls_data) < current_per_page:
+        if num_api_results < current_per_page:
+            print(
+                f"Reached end of results - only got {num_api_results}, was expecting"
+                f" {current_per_page}"
+            )
             break
 
         page += 1
