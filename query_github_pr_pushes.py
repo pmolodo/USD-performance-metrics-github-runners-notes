@@ -622,94 +622,104 @@ def time_range_overlaps_last_30_days(
 
 
 def fetch_repository_events(
-    owner: str,
-    project: str,
+    repos: list[str],
     headers: dict,
     verbosity: int = 1,
     start_time: datetime.datetime | None = None,
     end_time: datetime.datetime | None = None,
-) -> list:
+) -> dict[str, list]:
     """
-    Fetch all repository events using a combination of the GitHub Archive and
-    the GitHub Events REST API.
+    Fetch all repository events for multiple repositories using a combination of
+    the GitHub Archive and the GitHub Events REST API.
 
     This fetches events like PushEvent, which group commits together naturally,
     providing a more concrete view of push activities compared to individual
     commit timeline events.
 
     Args:
-        owner: Repository owner
-        project: Repository name
+        repos: List of repository full names in 'owner/repo' format
         headers: HTTP headers for API requests
         verbosity: Verbosity level for output
         start_time: Start of time range to fetch events for
         end_time: End of time range to fetch events for
 
     Returns:
-        List of repository events from both GitHub Archive and REST API
+        Dictionary mapping repository full names to lists of all events
     """
 
-    # Always try to get events from GitHub Archive first
-
-    all_events = fetch_archived_repository_events(
-        owner, project, verbosity, start_time, end_time
+    # Always try to get events from GitHub Archive first (batched)
+    archive_events_by_repo = fetch_archived_repository_events(
+        repos, verbosity, start_time, end_time
     )
 
+    # Initialize results with archive events
+    all_events_by_repo = {
+        repo: events[:] for repo, events in archive_events_by_repo.items()
+    }
+
     if verbosity >= 2:
-        print(f"Got {len(all_events)} events from GitHub Archive")
+        total_archive = sum(len(events) for events in archive_events_by_repo.values())
+        print(f"Got {total_archive} total events from GitHub Archive")
 
-    # If the time range overlaps with the last 30 days, also fetch from REST API
+    # If the time range overlaps with the last 30 days, also fetch from REST API for each repo
     if time_range_overlaps_last_30_days(start_time, end_time):
-        rest_api_events = fetch_repository_events_rest_api(
-            owner, project, headers, verbosity, start_time, end_time
-        )
+        for repo in repos:
+            owner, project = repo.split("/", 1)
 
-        # Merge events, avoiding duplicates based on event ID
-        existing_ids = {event.get("id") for event in all_events}
-        new_events = [
-            event for event in rest_api_events if event.get("id") not in existing_ids
-        ]
-        all_events.extend(new_events)
-
-        if verbosity >= 2:
-            print(
-                f"Got {len(rest_api_events)} events from REST API, "
-                f"{len(new_events)} were unique"
+            rest_api_events = fetch_repository_events_rest_api(
+                owner, project, headers, max(0, verbosity - 1), start_time, end_time
             )
 
-    if verbosity >= 1:
-        print(f"Total events retrieved: {len(all_events)}")
+            # Merge events, avoiding duplicates based on event ID
+            existing_ids = {event.get("id") for event in all_events_by_repo[repo]}
+            new_events = [
+                event
+                for event in rest_api_events
+                if event.get("id") not in existing_ids
+            ]
 
-    return all_events
+            all_events_by_repo[repo].extend(new_events)
+
+            if verbosity >= 2:
+                print(f"Added {len(new_events)} new events from REST API for {repo}")
+
+    if verbosity >= 1:
+        total_events = sum(len(events) for events in all_events_by_repo.values())
+        print(
+            f"Total events retrieved: {total_events} across {len(repos)} repositories"
+        )
+
+    return all_events_by_repo
 
 
 def fetch_archived_repository_events(
-    owner: str,
-    project: str,
+    repos: list[str],
     verbosity: int = 1,
     start_time: datetime.datetime | None = None,
     end_time: datetime.datetime | None = None,
-) -> list:
+) -> dict[str, list]:
     """
-    Fetch repository events using the GitHub Archive.
+    Fetch repository events using the GitHub Archive for multiple repositories.
 
     Downloads archive data for the requested time range and filters events
-    to match the specified time window.
+    to match the specified time window. Uses batched BigQuery calls for efficiency.
 
     Args:
-        owner: Repository owner (e.g., "PixarAnimationStudios")
-        project: Repository name (e.g., "OpenUSD")
+        repos: List of repository full names in 'owner/repo' format
         verbosity: Verbosity level for output
         start_time: Start of time range to fetch events for
         end_time: End of time range to fetch events for
 
     Returns:
-        list: Repository events from GitHub Archive within the time range
+        dict: Dictionary mapping repository full names to lists of events from GitHub Archive
     """
     import github_archive_repo_events
 
     if verbosity >= 1:
-        print(f"Fetching repository events from GitHub Archive for {owner}/{project}")
+        print(
+            "Fetching repository events from GitHub Archive for"
+            f" {len(repos)} repositories (batched)"
+        )
 
     # Determine month range for months to fetch
     # Use earliest archive date if no start_time specified
@@ -728,21 +738,29 @@ def fetch_archived_repository_events(
         print(f"Time range: {start_time} to {end_time}")
         print(f"Archive months: {start_month} to {end_month}")
 
-    # Use get_repo_events to download and process all events
-    all_events = github_archive_repo_events.get_repo_events(
-        repo_owner=owner,
-        repo_name=project,
+    # Use get_repo_events to download and process all events in a single batched call
+    events_by_repo = github_archive_repo_events.get_repo_events(
+        repos=repos,
         start_month=start_month,
         end_month=end_month,
     )
 
-    # Filter events by time range using common filtering function
-    filtered_events = filter_events_by_time_range(all_events, start_time, end_time)
+    # Filter events by time range for each repository
+    filtered_events_by_repo = {}
+    total_events = 0
+
+    for repo, events in events_by_repo.items():
+        filtered_events = filter_events_by_time_range(events, start_time, end_time)
+        filtered_events_by_repo[repo] = filtered_events
+        total_events += len(filtered_events)
 
     if verbosity >= 1:
-        print(f"Fetched {len(filtered_events)} events from GitHub Archive")
+        print(
+            f"Fetched {total_events} events total from GitHub Archive for"
+            f" {len(repos)} repositories"
+        )
 
-    return filtered_events
+    return filtered_events_by_repo
 
 
 def fetch_repository_events_rest_api(
@@ -1077,6 +1095,30 @@ def get_pr_push_events(
         Three-level nested dict: owner -> repo -> ref -> list of PushEvent objects,
         filtered to only include refs that appear in the input mapping
     """
+    # First, collect all unique repositories for batched processing
+    unique_repos = set()
+    for owner, repos in repo_refs.items():
+        for repo in repos:
+            unique_repos.add(f"{owner}/{repo}")
+
+    unique_repos_list = list(unique_repos)
+
+    if verbosity >= 1:
+        print(
+            f"Processing push events for {len(unique_repos_list)} unique repositories"
+            " (batched)"
+        )
+
+    # Fetch all repository events in a single batch to minimize BigQuery usage
+    all_events_by_repo = fetch_repository_events(
+        unique_repos_list,
+        headers,
+        verbosity=max(0, verbosity - 1),
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    # Process events for each repository to extract push events by ref
     aggregated_push_events = {}
     total_repos = 0
     total_events = 0
@@ -1087,28 +1129,40 @@ def get_pr_push_events(
         for repo, ref_names in repos.items():
             ref_events = repo_events.setdefault(repo, {})
             repo_id = f"{owner}/{repo}"
-
-            # Convert ref names to set for efficient lookups
             target_refs = set(ref_names)
 
             if verbosity >= 2:
                 print(f"  Processing {repo_id} with {len(target_refs)} refs...")
 
-            # Fetch push events for this repository
-            repo_push_events = get_repository_push_events(
-                owner,
-                repo,
-                headers,
-                verbosity=max(0, verbosity - 1),
-                start_time=start_time,
-                end_time=end_time,
-            )
+            # Get events for this repository from the batched results
+            repository_events = all_events_by_repo.get(repo_id, [])
+
+            # Extract PushEvents organized by ref
+            push_events_by_ref = {}
+            push_event_count = 0
+
+            for event in repository_events:
+                if event.get("type") == "PushEvent":
+                    push_event_count += 1
+                    payload = event.get("payload", {})
+                    ref = payload.get("ref")
+
+                    if ref:
+                        if ref not in push_events_by_ref:
+                            push_events_by_ref[ref] = []
+                        push_events_by_ref[ref].append(event)
+
+            if verbosity >= 3:
+                print(
+                    f"    Found {push_event_count} PushEvents across"
+                    f" {len(push_events_by_ref)} refs"
+                )
 
             # Process each requested ref to ensure all appear in output
             for ref_name in ref_names:
                 # Convert short ref name to full format for lookup
                 full_ref = f"refs/heads/{ref_name}"
-                events = repo_push_events.get(full_ref, [])
+                events = push_events_by_ref.get(full_ref, [])
 
                 # Use short ref name in output to match input format
                 ref_events[ref_name] = events
