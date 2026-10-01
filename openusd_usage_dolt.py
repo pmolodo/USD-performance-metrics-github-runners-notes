@@ -1242,12 +1242,11 @@ def render_trigger_count_svg(rows: Sequence[dict], path: Path):
                 f'y="{plot_top + plot_height - height:.1f}" width="{bar_width:.1f}" '
                 f'height="{height:.1f}" fill="{fill}" rx="1" />'
             )
-        if effective:
             body.append(
                 svg_text(
-                    group_left + bar_width * 1.5,
-                    plot_top + plot_height - effective / axis_max * plot_height - 6,
-                    f"{int(effective)}",
+                    group_left + offset + bar_width * 0.5,
+                    plot_top + plot_height - height - 6,
+                    f"{int(value)}",
                     css_class="value",
                     anchor="middle",
                 )
