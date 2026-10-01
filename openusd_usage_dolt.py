@@ -8,6 +8,7 @@ through the authenticated ``gh`` CLI.
 
 Examples:
     ./run_openusd_usage.sh sync-all --start-date 2021-09-16
+    ./run_openusd_usage.sh export-monthly
     ./run_openusd_usage.sh report
     ./run_openusd_usage.sh sync-pr-events --start-date 2021-09-16
 """
@@ -16,6 +17,7 @@ import argparse
 import csv
 import datetime
 import hashlib
+import html
 import json
 import math
 import statistics
@@ -38,6 +40,9 @@ import requests
 THIS_DIR = Path(__file__).resolve().parent
 DEFAULT_DATABASE_DIR = THIS_DIR / ".cache" / "openusd_usage_dolt"
 DEFAULT_REPORT = THIS_DIR / "openusd_usage_forecast.md"
+DEFAULT_MONTHLY_CSV = THIS_DIR / "openusd_triggering_events_monthly.csv"
+DEFAULT_MONTHLY_SVG = THIS_DIR / "openusd_triggering_events_monthly.svg"
+DEFAULT_COMPUTE_SVG = THIS_DIR / "openusd_runner_minutes_monthly.svg"
 REPOSITORY = "PixarAnimationStudios/OpenUSD"
 REPOSITORY_ID = 58168143
 BUILD_WORKFLOW_NAME = "BuildUSD"
@@ -45,6 +50,10 @@ CLICKHOUSE_URL = "https://sql-clickhouse.clickhouse.com/"
 CLICKHOUSE_USER = "demo"
 FORECAST_MONTHS = 60
 TRIGGER_ACTIONS = ("opened", "synchronize", "reopened")
+# Earlier cached months contain BuildUSD records, but complete all-workflow
+# collection starts here. Treat earlier months as unavailable or partial.
+COMPLETE_TRIGGER_COVERAGE_START = datetime.date(2025, 9, 1)
+TRIGGER_CLUSTER_MINUTES = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sync_metadata (
@@ -227,6 +236,12 @@ def next_month(day: datetime.date) -> datetime.date:
     if day.month == 12:
         return datetime.date(day.year + 1, 1, 1)
     return datetime.date(day.year, day.month + 1, 1)
+
+
+def shift_months(day: datetime.date, offset: int) -> datetime.date:
+    month_index = day.year * 12 + day.month - 1 + offset
+    year, month = divmod(month_index, 12)
+    return datetime.date(year, month + 1, 1)
 
 
 def iter_months(start: datetime.date, end: datetime.date) -> Iterable[datetime.date]:
@@ -663,9 +678,7 @@ def step_rows(jobs: Iterable[dict]) -> Iterable[dict]:
             }
 
 
-def fetch_action_runs(
-    workflow_id: int, start_date: datetime.date, end_date: datetime.date
-) -> list[dict]:
+def fetch_action_runs(start_date: datetime.date, end_date: datetime.date) -> list[dict]:
     runs = []
     for month in iter_months(start_date, end_date):
         window_start = max(start_date, month)
@@ -673,7 +686,7 @@ def fetch_action_runs(
         last_day = window_end - datetime.timedelta(days=1)
         created = f"{window_start.isoformat()}..{last_day.isoformat()}"
         window_runs = github_paginated(
-            f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs",
+            f"repos/{REPOSITORY}/actions/runs",
             "workflow_runs",
             {"created": created},
         )
@@ -704,21 +717,8 @@ def sync_actions(
     write_csv(workflow_path, workflow_fields, workflow_rows(workflows))
     import_csv(database_dir, "workflows", workflow_path)
 
-    build_workflows = [
-        workflow for workflow in workflows if workflow["name"] == BUILD_WORKFLOW_NAME
-    ]
-    if len(build_workflows) != 1:
-        raise RuntimeError(
-            f"Expected exactly one {BUILD_WORKFLOW_NAME} workflow, "
-            f"found {len(build_workflows)}"
-        )
-    workflow_id = build_workflows[0]["id"]
-
-    print(
-        f"Fetching {BUILD_WORKFLOW_NAME} Actions runs from {start_date} "
-        f"through {end_date}..."
-    )
-    runs = fetch_action_runs(workflow_id, start_date, end_date)
+    print(f"Fetching all Actions runs from {start_date} through {end_date}...")
+    runs = fetch_action_runs(start_date, end_date)
     fetched_at = (
         datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(" ")
     )
@@ -812,6 +812,557 @@ def sync_actions(
         f"Import {len(runs)} OpenUSD Actions runs and {len(jobs)} jobs",
     )
     print(f"Imported {len(runs)} runs and {len(jobs)} jobs.")
+
+
+###############################################################################
+# Trigger-event and compute exports
+###############################################################################
+
+
+def workflow_run_export_rows(
+    database_dir: Path, start: datetime.date, end: datetime.date
+) -> list[dict[str, str]]:
+    return query_csv(
+        database_dir,
+        "SELECT run_id, workflow_id, workflow_name, event, created_at, "
+        "head_branch, head_sha, actor_login, raw_json FROM workflow_runs "
+        f"WHERE created_at >= '{start}' AND created_at < '{end}' "
+        "ORDER BY created_at, run_id;",
+    )
+
+
+def workflow_job_export_rows(
+    database_dir: Path, start: datetime.date, end: datetime.date
+) -> list[dict[str, str]]:
+    return query_csv(
+        database_dir,
+        "SELECT j.job_id, j.run_id, j.started_at, j.completed_at, "
+        "j.labels_json, j.conclusion, j.raw_json FROM workflow_jobs j "
+        "JOIN workflow_runs r ON r.run_id = j.run_id "
+        f"WHERE r.created_at >= '{start}' AND r.created_at < '{end}' "
+        "ORDER BY j.started_at, j.job_id;",
+    )
+
+
+def parse_database_datetime(value: str) -> datetime.datetime:
+    return datetime.datetime.fromisoformat(value)
+
+
+def source_signature(run: dict[str, str]) -> tuple[str, str]:
+    event = run["event"]
+    head_sha = run["head_sha"]
+    if event in {
+        "merge_group",
+        "pull_request",
+        "pull_request_target",
+        "push",
+        "workflow_run",
+    }:
+        identity = head_sha or f"{run['head_branch']}:{run['actor_login']}"
+        return "source", identity
+    if event == "schedule":
+        created_at = parse_database_datetime(run["created_at"])
+        return "schedule", created_at.strftime("%Y-%m-%dT%H:%M")
+    return "run", run["run_id"]
+
+
+def clustered_events(
+    occurrences: Iterable[dict], signature_key: str, time_key: str
+) -> list[dict]:
+    clusters = []
+    latest_by_signature: dict[object, dict] = {}
+    maximum_gap = datetime.timedelta(minutes=TRIGGER_CLUSTER_MINUTES)
+    for occurrence in sorted(occurrences, key=lambda item: item[time_key]):
+        signature = occurrence[signature_key]
+        previous = latest_by_signature.get(signature)
+        if previous and occurrence[time_key] - previous["latest_at"] <= maximum_gap:
+            previous["latest_at"] = occurrence[time_key]
+            previous["occurrences"].append(occurrence)
+            continue
+        cluster = {
+            "started_at": occurrence[time_key],
+            "latest_at": occurrence[time_key],
+            "occurrences": [occurrence],
+        }
+        clusters.append(cluster)
+        latest_by_signature[signature] = cluster
+    return clusters
+
+
+def infer_source_events(run_rows: Iterable[dict[str, str]]) -> list[dict]:
+    occurrences = []
+    for run in run_rows:
+        occurrences.append(
+            {
+                "created_at": parse_database_datetime(run["created_at"]),
+                "event": run["event"],
+                "run_id": int(run["run_id"]),
+                "signature": source_signature(run),
+                "workflow_id": int(run["workflow_id"]),
+                "workflow_name": run["workflow_name"],
+            }
+        )
+    return clustered_events(occurrences, "signature", "created_at")
+
+
+def job_attempt(job: dict[str, str]) -> int:
+    return int(json.loads(job["raw_json"]).get("run_attempt", 1))
+
+
+def infer_rerun_events(
+    run_rows: Iterable[dict[str, str]], job_rows: Iterable[dict[str, str]]
+) -> tuple[list[dict], list[dict]]:
+    runs_by_id = {int(run["run_id"]): run for run in run_rows}
+    attempts: dict[tuple[int, int], dict] = {}
+    for job in job_rows:
+        attempt = job_attempt(job)
+        if attempt <= 1 or not job["started_at"]:
+            continue
+        run_id = int(job["run_id"])
+        started_at = parse_database_datetime(job["started_at"])
+        key = (run_id, attempt)
+        current = attempts.get(key)
+        if current is None or started_at < current["started_at"]:
+            run = runs_by_id[run_id]
+            attempts[key] = {
+                "attempt": attempt,
+                "run_id": run_id,
+                "signature": (
+                    run["head_sha"] or run["head_branch"],
+                    attempt,
+                ),
+                "started_at": started_at,
+                "workflow_id": int(run["workflow_id"]),
+                "workflow_name": run["workflow_name"],
+            }
+    attempt_rows = list(attempts.values())
+    return (
+        clustered_events(attempt_rows, "signature", "started_at"),
+        attempt_rows,
+    )
+
+
+def runner_family(labels_json: str) -> str:
+    labels = " ".join(json.loads(labels_json)).lower()
+    if "macos" in labels:
+        return "macos"
+    if "windows" in labels:
+        return "windows"
+    if any(label in labels for label in ("linux", "ubuntu")):
+        return "linux"
+    return "other"
+
+
+def job_minutes(job: dict[str, str]) -> float:
+    if not job["started_at"] or not job["completed_at"]:
+        return 0.0
+    started_at = parse_database_datetime(job["started_at"])
+    completed_at = parse_database_datetime(job["completed_at"])
+    return max(0.0, (completed_at - started_at).total_seconds() / 60)
+
+
+def monthly_triggering_event_rows(
+    database_dir: Path,
+    start: datetime.date,
+    end: datetime.date,
+) -> list[dict]:
+    run_rows = workflow_run_export_rows(database_dir, start, end)
+    job_rows = workflow_job_export_rows(database_dir, start, end)
+    source_events = infer_source_events(run_rows)
+    rerun_events, rerun_attempts = infer_rerun_events(run_rows, job_rows)
+
+    source_by_month: dict[str, int] = {}
+    reruns_by_month: dict[str, int] = {}
+    attempts_by_month: dict[str, int] = {}
+    runs_by_month: dict[str, int] = {}
+    minutes_by_month: dict[str, dict[str, float]] = {}
+    for event in source_events:
+        month = event["started_at"].strftime("%Y-%m")
+        source_by_month[month] = source_by_month.get(month, 0) + 1
+    for event in rerun_events:
+        month = event["started_at"].strftime("%Y-%m")
+        reruns_by_month[month] = reruns_by_month.get(month, 0) + 1
+    for attempt in rerun_attempts:
+        month = attempt["started_at"].strftime("%Y-%m")
+        attempts_by_month[month] = attempts_by_month.get(month, 0) + 1
+    for run in run_rows:
+        month = run["created_at"][:7]
+        runs_by_month[month] = runs_by_month.get(month, 0) + 1
+    for job in job_rows:
+        if not job["started_at"]:
+            continue
+        month = job["started_at"][:7]
+        family = runner_family(job["labels_json"])
+        monthly_minutes = minutes_by_month.setdefault(
+            month,
+            {"linux": 0.0, "macos": 0.0, "other": 0.0, "windows": 0.0},
+        )
+        monthly_minutes[family] += job_minutes(job)
+
+    rows = []
+    first_observed = min(
+        (first_of_month(event["started_at"].date()) for event in source_events),
+        default=end,
+    )
+    for month in iter_months(start, end):
+        month_key = month.strftime("%Y-%m")
+        if month < first_observed:
+            rows.append(
+                {
+                    "month": month_key,
+                    "coverage_status": "unavailable",
+                    "workflow_data_source": "not_available",
+                    "source_triggering_events": "",
+                    "rerun_triggering_events": "",
+                    "triggering_events_including_reruns": "",
+                    "workflow_runs": "",
+                    "workflow_rerun_attempts": "",
+                    "linux_runner_minutes": "",
+                    "macos_runner_minutes": "",
+                    "windows_runner_minutes": "",
+                    "other_runner_minutes": "",
+                    "linux_minutes_per_source_event": "",
+                    "macos_minutes_per_source_event": "",
+                    "windows_minutes_per_source_event": "",
+                    "other_minutes_per_source_event": "",
+                }
+            )
+            continue
+        coverage = "complete" if month >= COMPLETE_TRIGGER_COVERAGE_START else "partial"
+        source_count = source_by_month.get(month_key, 0)
+        rerun_count = reruns_by_month.get(month_key, 0)
+        effective_count = source_count + rerun_count
+        minutes = minutes_by_month.get(
+            month_key,
+            {"linux": 0.0, "macos": 0.0, "other": 0.0, "windows": 0.0},
+        )
+        rows.append(
+            {
+                "month": month_key,
+                "coverage_status": coverage,
+                "workflow_data_source": "github_rest_api_cached_in_dolt",
+                "source_triggering_events": source_count,
+                "rerun_triggering_events": rerun_count,
+                "triggering_events_including_reruns": effective_count,
+                "workflow_runs": runs_by_month.get(month_key, 0),
+                "workflow_rerun_attempts": attempts_by_month.get(month_key, 0),
+                "linux_runner_minutes": f"{minutes['linux']:.1f}",
+                "macos_runner_minutes": f"{minutes['macos']:.1f}",
+                "windows_runner_minutes": f"{minutes['windows']:.1f}",
+                "other_runner_minutes": f"{minutes['other']:.1f}",
+                "linux_minutes_per_source_event": (
+                    f"{minutes['linux'] / source_count:.1f}" if source_count else ""
+                ),
+                "macos_minutes_per_source_event": (
+                    f"{minutes['macos'] / source_count:.1f}" if source_count else ""
+                ),
+                "windows_minutes_per_source_event": (
+                    f"{minutes['windows'] / source_count:.1f}" if source_count else ""
+                ),
+                "other_minutes_per_source_event": (
+                    f"{minutes['other'] / source_count:.1f}" if source_count else ""
+                ),
+            }
+        )
+    return rows
+
+
+def svg_text(
+    x: float,
+    y: float,
+    value: str,
+    *,
+    css_class: str = "",
+    anchor: str = "start",
+    transform: str = "",
+) -> str:
+    attributes = [f'x="{x:.1f}"', f'y="{y:.1f}"', f'text-anchor="{anchor}"']
+    if css_class:
+        attributes.append(f'class="{css_class}"')
+    if transform:
+        attributes.append(f'transform="{transform}"')
+    return f"<text {' '.join(attributes)}>{html.escape(value)}</text>"
+
+
+def nice_axis_max(maximum: float) -> tuple[float, float]:
+    if maximum <= 50:
+        step = 10.0
+    elif maximum <= 100:
+        step = 20.0
+    elif maximum <= 500:
+        step = 100.0
+    elif maximum <= 2000:
+        step = 500.0
+    elif maximum <= 10000:
+        step = 2000.0
+    else:
+        step = 10000.0
+    return math.ceil(maximum / step) * step, step
+
+
+def svg_document(title: str, subtitle: str, body: Iterable[str]) -> str:
+    return "\n".join(
+        [
+            (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" '
+                'viewBox="0 0 1600 820" role="img">'
+            ),
+            f"<title>{html.escape(title)}</title>",
+            f"<desc>{html.escape(subtitle)}</desc>",
+            "<style>",
+            "text { font-family: Arial, sans-serif; fill: #24292f; }",
+            ".title { font-size: 28px; font-weight: 700; }",
+            ".subtitle { font-size: 16px; fill: #57606a; }",
+            ".axis { font-size: 13px; fill: #57606a; }",
+            ".value { font-size: 11px; font-weight: 700; }",
+            ".note { font-size: 14px; fill: #57606a; }",
+            ".grid { stroke: #d0d7de; stroke-width: 1; }",
+            ".axis-line { stroke: #57606a; stroke-width: 1.5; }",
+            "</style>",
+            *body,
+            "</svg>",
+            "",
+        ]
+    )
+
+
+def render_coverage_background(
+    rows: Sequence[dict],
+    plot_left: float,
+    plot_top: float,
+    plot_width: float,
+    plot_height: float,
+) -> list[str]:
+    cell_width = plot_width / len(rows)
+    output = []
+    for index, row in enumerate(rows):
+        if row["coverage_status"] == "complete":
+            continue
+        fill = "#f6f8fa" if row["coverage_status"] == "unavailable" else "#fff8c5"
+        output.append(
+            f'<rect x="{plot_left + index * cell_width:.1f}" y="{plot_top:.1f}" '
+            f'width="{cell_width + 0.2:.1f}" height="{plot_height:.1f}" '
+            f'fill="{fill}" />'
+        )
+    return output
+
+
+def render_axes(
+    rows: Sequence[dict],
+    axis_max: float,
+    axis_step: float,
+    plot_left: float,
+    plot_top: float,
+    plot_width: float,
+    plot_height: float,
+) -> list[str]:
+    output = []
+    tick = 0.0
+    while tick <= axis_max + 0.001:
+        y = plot_top + plot_height - tick / axis_max * plot_height
+        output.append(
+            f'<line x1="{plot_left:.1f}" y1="{y:.1f}" '
+            f'x2="{plot_left + plot_width:.1f}" y2="{y:.1f}" class="grid" />'
+        )
+        output.append(
+            svg_text(
+                plot_left - 12, y + 4, f"{tick:,.0f}", css_class="axis", anchor="end"
+            )
+        )
+        tick += axis_step
+    output.append(
+        f'<line x1="{plot_left:.1f}" y1="{plot_top + plot_height:.1f}" '
+        f'x2="{plot_left + plot_width:.1f}" y2="{plot_top + plot_height:.1f}" '
+        'class="axis-line" />'
+    )
+    cell_width = plot_width / len(rows)
+    for index, row in enumerate(rows):
+        month_number = int(row["month"][5:7])
+        if month_number not in (1, 4, 7, 10):
+            continue
+        x = plot_left + (index + 0.5) * cell_width
+        output.append(
+            svg_text(
+                x,
+                plot_top + plot_height + 24,
+                row["month"],
+                css_class="axis",
+                anchor="end",
+                transform=f"rotate(-45 {x:.1f} {plot_top + plot_height + 24:.1f})",
+            )
+        )
+    return output
+
+
+def render_trigger_count_svg(rows: Sequence[dict], path: Path):
+    values = [
+        float(row["triggering_events_including_reruns"])
+        for row in rows
+        if row["triggering_events_including_reruns"] != ""
+    ]
+    axis_max, axis_step = nice_axis_max(max(values, default=1))
+    plot_left, plot_top = 90.0, 145.0
+    plot_width, plot_height = 1460.0, 480.0
+    cell_width = plot_width / len(rows)
+    body = [
+        svg_text(55, 52, "OpenUSD Triggering Events per Month", css_class="title"),
+        svg_text(
+            55,
+            82,
+            "One source event counts once across workflows; the second bar adds"
+            " inferred rerun events.",
+            css_class="subtitle",
+        ),
+        *render_coverage_background(rows, plot_left, plot_top, plot_width, plot_height),
+        *render_axes(
+            rows, axis_max, axis_step, plot_left, plot_top, plot_width, plot_height
+        ),
+    ]
+    for index, row in enumerate(rows):
+        if row["source_triggering_events"] == "":
+            continue
+        source = float(row["source_triggering_events"])
+        effective = float(row["triggering_events_including_reruns"])
+        group_left = plot_left + index * cell_width + cell_width * 0.12
+        bar_width = cell_width * 0.34
+        for offset, value, fill in (
+            (0.0, source, "#0969da"),
+            (bar_width, effective, "#bf8700"),
+        ):
+            height = value / axis_max * plot_height
+            body.append(
+                f'<rect x="{group_left + offset:.1f}" '
+                f'y="{plot_top + plot_height - height:.1f}" width="{bar_width:.1f}" '
+                f'height="{height:.1f}" fill="{fill}" rx="1" />'
+            )
+        if effective:
+            body.append(
+                svg_text(
+                    group_left + bar_width * 1.5,
+                    plot_top + plot_height - effective / axis_max * plot_height - 6,
+                    f"{int(effective)}",
+                    css_class="value",
+                    anchor="middle",
+                )
+            )
+    body.extend(
+        [
+            '<rect x="90" y="710" width="18" height="18" fill="#0969da" />',
+            svg_text(116, 724, "Source events", css_class="note"),
+            '<rect x="245" y="710" width="18" height="18" fill="#bf8700" />',
+            svg_text(271, 724, "Source events plus reruns", css_class="note"),
+            '<rect x="500" y="710" width="18" height="18" fill="#fff8c5" />',
+            svg_text(526, 724, "Partial coverage", css_class="note"),
+            '<rect x="680" y="710" width="18" height="18" fill="#f6f8fa" />',
+            svg_text(706, 724, "Unavailable", css_class="note"),
+            svg_text(
+                90,
+                775,
+                "Inference clusters runs sharing a commit identity within five minutes."
+                " Reruns use job attempt start times.",
+                css_class="note",
+            ),
+        ]
+    )
+    path.write_text(
+        svg_document(
+            "OpenUSD triggering events per month",
+            "Monthly source-trigger counts with and without rerun events.",
+            body,
+        ),
+        encoding="utf-8",
+    )
+
+
+def render_compute_svg(rows: Sequence[dict], path: Path):
+    series = [
+        ("linux_runner_minutes", "#1f883d", "Linux"),
+        ("windows_runner_minutes", "#0969da", "Windows"),
+        ("macos_runner_minutes", "#8250df", "macOS"),
+    ]
+    if any(row["other_runner_minutes"] not in ("", "0.0") for row in rows):
+        series.append(("other_runner_minutes", "#bf8700", "Other"))
+    values = [
+        float(row[key])
+        for row in rows
+        if row["linux_runner_minutes"] != ""
+        for key, _, _ in series
+    ]
+    axis_max, axis_step = nice_axis_max(max(values, default=1.0))
+    plot_left, plot_top = 90.0, 145.0
+    plot_width, plot_height = 1460.0, 480.0
+    cell_width = plot_width / len(rows)
+    body = [
+        svg_text(
+            55,
+            52,
+            "Observed OpenUSD Runner Minutes by Platform",
+            css_class="title",
+        ),
+        svg_text(
+            55,
+            82,
+            "Context only: OpenUSD workflow duration is not assumed to predict another"
+            " workflow.",
+            css_class="subtitle",
+        ),
+        *render_coverage_background(rows, plot_left, plot_top, plot_width, plot_height),
+        *render_axes(
+            rows, axis_max, axis_step, plot_left, plot_top, plot_width, plot_height
+        ),
+    ]
+    for index, row in enumerate(rows):
+        if row["linux_runner_minutes"] == "":
+            continue
+        group_left = plot_left + index * cell_width + cell_width * 0.1
+        bar_width = cell_width * 0.8 / len(series)
+        for series_index, (key, fill, _) in enumerate(series):
+            value = float(row[key])
+            height = value / axis_max * plot_height
+            y = plot_top + plot_height - height
+            body.append(
+                f'<rect x="{group_left + series_index * bar_width:.1f}" '
+                f'y="{y:.1f}" width="{bar_width:.1f}" '
+                f'height="{height:.1f}" fill="{fill}" rx="1" />'
+            )
+    legend_x = 90
+    for _, fill, label in series:
+        x = legend_x
+        body.append(f'<rect x="{x}" y="710" width="18" height="18" fill="{fill}" />')
+        body.append(svg_text(x + 26, 724, label, css_class="note"))
+        legend_x += 125
+    body.append(
+        svg_text(
+            90,
+            775,
+            "Platform series are not combined. Durations include rerun attempts;"
+            " skipped jobs contribute zero.",
+            css_class="note",
+        )
+    )
+    path.write_text(
+        svg_document(
+            "Observed OpenUSD runner minutes by platform",
+            "Monthly per-platform runner-minutes including workflow rerun attempts.",
+            body,
+        ),
+        encoding="utf-8",
+    )
+
+
+def export_monthly_triggering_events(
+    database_dir: Path, csv_path: Path, svg_path: Path, compute_svg_path: Path
+):
+    end = first_of_month(datetime.date.today())
+    start = shift_months(end, -60)
+    rows = monthly_triggering_event_rows(database_dir, start, end)
+    fieldnames = tuple(rows[0])
+    write_csv(csv_path, fieldnames, rows)
+    render_trigger_count_svg(rows, svg_path)
+    render_compute_svg(rows, compute_svg_path)
+    print(f"Wrote {csv_path}")
+    print(f"Wrote {svg_path}")
+    print(f"Wrote {compute_svg_path}")
 
 
 ###############################################################################
@@ -1284,6 +1835,7 @@ def get_parser() -> argparse.ArgumentParser:
         choices=(
             "init",
             "report",
+            "export-monthly",
             "sync-actions",
             "sync-all",
             "sync-pr-events",
@@ -1292,6 +1844,9 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--database-dir", type=Path, default=DEFAULT_DATABASE_DIR)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--monthly-csv", type=Path, default=DEFAULT_MONTHLY_CSV)
+    parser.add_argument("--monthly-svg", type=Path, default=DEFAULT_MONTHLY_SVG)
+    parser.add_argument("--compute-svg", type=Path, default=DEFAULT_COMPUTE_SVG)
     parser.add_argument(
         "--start-date",
         type=parse_date,
@@ -1323,6 +1878,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             sync_actions(database_dir, stage_dir, args.start_date, args.end_date)
         if args.command in ("report", "sync-all"):
             render_report(database_dir, args.report.resolve())
+        if args.command == "export-monthly":
+            export_monthly_triggering_events(
+                database_dir,
+                args.monthly_csv.resolve(),
+                args.monthly_svg.resolve(),
+                args.compute_svg.resolve(),
+            )
     except Exception:  # pylint: disable=broad-except
         traceback.print_exc()
         return 1
