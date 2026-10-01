@@ -15,6 +15,7 @@ Examples:
 """
 
 import argparse
+import collections
 import csv
 import datetime
 import hashlib
@@ -27,9 +28,8 @@ import subprocess
 import sys
 import traceback
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from pathlib import Path
 
 import requests
@@ -49,13 +49,39 @@ DEFAULT_RELEASE_RATE_SVG = (
 )
 DEFAULT_COMPUTE_SVG = THIS_DIR / "openusd_runner_minutes_by_release.svg"
 DEFAULT_COMPUTE_RATE_SVG = THIS_DIR / "openusd_runner_minutes_per_month_by_release.svg"
+DEFAULT_FORECAST_CSV = THIS_DIR / "openusd_triggering_events_forecast.csv"
+DEFAULT_EFFECTIVE_RELEASE_FORECAST_SVG = (
+    THIS_DIR / "openusd_triggering_events_per_month_by_release_forecast.svg"
+)
 REPOSITORY = "PixarAnimationStudios/OpenUSD"
 REPOSITORY_ID = 58168143
 BUILD_WORKFLOW_NAME = "BuildUSD"
 CLICKHOUSE_URL = "https://sql-clickhouse.clickhouse.com/"
 CLICKHOUSE_USER = "demo"
 FORECAST_MONTHS = 60
-TRIGGER_ACTIONS = ("opened", "synchronize", "reopened")
+# The high scenario continues 100% of the observed per-release linear slope.
+# The mid and low scenarios retain one-half and one-quarter of that slope to
+# account for the small sample and the risk that the current release burst
+# overstates durable growth.
+FORECAST_SCENARIO_GROWTH = {
+    "low": 0.25,
+    "mid": 0.50,
+    "high": 1.00,
+}
+TREND_COVERAGE_STATUSES = frozenset({"complete", "in_progress"})
+# In the current release cycle, the first four weeks ran at about half the
+# cycle-average rate, the middle period approached the average, and recent
+# release-close weeks reached about 1.6 times the average. The three factors
+# sum to 3.0, preserving the cycle average before the small trend adjustment;
+# forecast generation normalizes each cycle to preserve it exactly.
+RELEASE_PHASES = (
+    ("early", 0.5),
+    ("middle", 0.9),
+    ("late", 1.6),
+)
+FORECAST_RELEASES = FORECAST_MONTHS // len(RELEASE_PHASES)
+RELEASES_PER_YEAR = 4
+FORECAST_YEARS = FORECAST_RELEASES // RELEASES_PER_YEAR
 # Earlier cached months contain BuildUSD records, but complete all-workflow
 # collection starts here. Treat earlier months as unavailable or partial.
 COMPLETE_TRIGGER_COVERAGE_START = datetime.date(2025, 9, 1)
@@ -205,14 +231,6 @@ CREATE TABLE IF NOT EXISTS job_steps (
 ###############################################################################
 # Data structures
 ###############################################################################
-
-
-@dataclass(frozen=True)
-class ModelResult:
-    name: str
-    mae: float
-    rmse: float
-    fit: Callable[[float], float]
 
 
 ###############################################################################
@@ -1584,454 +1602,525 @@ def export_release_triggering_events(
 ###############################################################################
 
 
-def constant_fit(values: Sequence[float]) -> Callable[[float], float]:
-    mean = statistics.fmean(values)
-    return lambda _: mean
-
-
-def trailing_mean_fit(values: Sequence[float]) -> Callable[[float], float]:
-    mean = statistics.fmean(values[-24:])
-    return lambda _: mean
-
-
-def linear_coefficients(
-    xs: Sequence[float], ys: Sequence[float]
-) -> tuple[float, float]:
-    x_mean = statistics.fmean(xs)
-    y_mean = statistics.fmean(ys)
-    denominator = sum((x - x_mean) ** 2 for x in xs)
-    if denominator == 0:
-        return y_mean, 0.0
-    slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys)) / denominator
-    return y_mean - slope * x_mean, slope
-
-
-def linear_fit(values: Sequence[float]) -> Callable[[float], float]:
-    intercept, slope = linear_coefficients(list(range(len(values))), values)
-    return lambda x: max(0.0, intercept + slope * x)
-
-
-def exponential_fit(values: Sequence[float]) -> Callable[[float], float]:
-    transformed = [math.log1p(max(0.0, value)) for value in values]
-    intercept, slope = linear_coefficients(list(range(len(values))), transformed)
-    return lambda x: max(0.0, math.exp(intercept + slope * x) - 1.0)
-
-
-def solve_three_by_three(matrix: list[list[float]], vector: list[float]) -> list[float]:
-    augmented = [row[:] + [value] for row, value in zip(matrix, vector)]
-    for column in range(3):
-        pivot = max(range(column, 3), key=lambda row: abs(augmented[row][column]))
-        if abs(augmented[pivot][column]) < 1e-12:
-            raise ValueError("Singular quadratic regression matrix")
-        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
-        divisor = augmented[column][column]
-        augmented[column] = [value / divisor for value in augmented[column]]
-        for row in range(3):
-            if row == column:
-                continue
-            factor = augmented[row][column]
-            augmented[row] = [
-                value - factor * pivot_value
-                for value, pivot_value in zip(augmented[row], augmented[column])
-            ]
-    return [augmented[row][3] for row in range(3)]
-
-
-def quadratic_fit(values: Sequence[float]) -> Callable[[float], float]:
-    xs = list(range(len(values)))
-    matrix = [
-        [len(xs), sum(xs), sum(x**2 for x in xs)],
-        [sum(xs), sum(x**2 for x in xs), sum(x**3 for x in xs)],
-        [sum(x**2 for x in xs), sum(x**3 for x in xs), sum(x**4 for x in xs)],
-    ]
-    vector = [
-        sum(values),
-        sum(x * y for x, y in zip(xs, values)),
-        sum((x**2) * y for x, y in zip(xs, values)),
-    ]
-    intercept, linear, quadratic = solve_three_by_three(matrix, vector)
-    return lambda x: max(0.0, intercept + linear * x + quadratic * x**2)
-
-
-MODEL_FACTORIES: dict[str, Callable[[Sequence[float]], Callable[[float], float]]] = {
-    "constant": constant_fit,
-    "exponential": exponential_fit,
-    "linear": linear_fit,
-    "quadratic": quadratic_fit,
-    "trailing-24-month mean": trailing_mean_fit,
-}
-
-
-def evaluate_models(values: Sequence[float]) -> list[ModelResult]:
-    minimum_training = max(24, len(values) - 24)
-    results = []
-    for name, factory in MODEL_FACTORIES.items():
-        errors = []
-        squared_errors = []
-        for index in range(minimum_training, len(values)):
-            predictor = factory(values[:index])
-            error = predictor(index) - values[index]
-            errors.append(abs(error))
-            squared_errors.append(error**2)
-        if not errors:
-            raise ValueError("Not enough complete months for model evaluation")
-        results.append(
-            ModelResult(
-                name=name,
-                mae=statistics.fmean(errors),
-                rmse=math.sqrt(statistics.fmean(squared_errors)),
-                fit=factory(values),
-            )
-        )
-    return sorted(results, key=lambda result: (result.mae, result.rmse))
-
-
-def complete_month_bounds(database_dir: Path) -> tuple[datetime.date, datetime.date]:
-    rows = query_csv(
-        database_dir,
-        "SELECT MIN(event_at) AS first_event, MAX(event_at) AS last_event FROM ("
-        "SELECT created_at AS event_at FROM pull_request_events UNION ALL "
-        "SELECT event_at FROM pull_request_timeline_events WHERE event_at IS NOT NULL"
-        ") events;",
+def observed_monthly_trigger_rows(database_dir: Path) -> list[dict]:
+    data_end = cached_action_end(database_dir)
+    end = first_of_month(data_end.date())
+    start = COMPLETE_TRIGGER_COVERAGE_START
+    if end <= start:
+        raise RuntimeError("No complete Actions months are cached")
+    run_rows = workflow_run_export_rows(database_dir, start, end)
+    job_rows = workflow_job_export_rows(database_dir, start, end)
+    source_events = infer_source_events(run_rows)
+    rerun_events, _ = infer_rerun_events(run_rows, job_rows)
+    source_by_month = collections.Counter(
+        event["started_at"].strftime("%Y-%m") for event in source_events
     )
-    if not rows or not rows[0]["first_event"]:
-        raise RuntimeError("No pull-request events are cached")
-    first = datetime.date.fromisoformat(rows[0]["first_event"][:10])
-    last = datetime.date.fromisoformat(rows[0]["last_event"][:10])
-    metadata = query_csv(
-        database_dir,
-        "SELECT meta_value FROM sync_metadata WHERE meta_key = 'pr_events_start_date';",
+    reruns_by_month = collections.Counter(
+        event["started_at"].strftime("%Y-%m") for event in rerun_events
     )
-    if metadata:
-        first = max(first, datetime.date.fromisoformat(metadata[0]["meta_value"]))
-    start = next_month(first_of_month(first)) if first.day != 1 else first
-    end = first_of_month(last)
-    return start, end
-
-
-def monthly_trigger_counts(
-    database_dir: Path, start: datetime.date, end: datetime.date
-) -> list[tuple[datetime.date, float]]:
-    actions = ",".join(f"'{action}'" for action in TRIGGER_ACTIONS)
-    rows = query_csv(
-        database_dir,
-        "SELECT DATE_FORMAT(created_at, '%Y-%m-01') AS month, "
-        "COUNT(*) AS triggers FROM pull_request_events "
-        f"WHERE action IN ({actions}) "
-        f"AND created_at >= '{start}' AND created_at < '{end}' "
-        "GROUP BY month ORDER BY month;",
-    )
-    by_month = {row["month"][:10]: float(row["triggers"]) for row in rows}
     return [
-        (month, by_month.get(month.isoformat(), 0.0))
+        {
+            "month": month.strftime("%Y-%m"),
+            "source_events": source_by_month[month.strftime("%Y-%m")],
+            "events_including_reruns": (
+                source_by_month[month.strftime("%Y-%m")]
+                + reruns_by_month[month.strftime("%Y-%m")]
+            ),
+        }
         for month in iter_months(start, end)
     ]
 
 
-def actual_workflow_counts(database_dir: Path) -> dict[str, int]:
-    rows = query_csv(
-        database_dir,
-        "SELECT DATE_FORMAT(r.created_at, '%Y-%m-01') AS month, COUNT(*) AS runs "
-        "FROM workflow_runs r JOIN workflows w ON w.workflow_id = r.workflow_id "
-        f"WHERE w.name = '{BUILD_WORKFLOW_NAME}' AND r.event = 'pull_request' "
-        "GROUP BY month ORDER BY month;",
-    )
-    return {row["month"][:10]: int(row["runs"]) for row in rows}
+def forecast_baseline(release_rows: Sequence[dict]) -> float:
+    current_rows = [
+        row for row in release_rows if row["coverage_status"] == "in_progress"
+    ]
+    if len(current_rows) != 1:
+        raise RuntimeError("Exactly one in-progress release cycle is required")
+    current = current_rows[0]
+    return float(current["events_including_reruns_per_30_4375_days"])
 
 
-def runner_usage_by_label(
-    database_dir: Path, end: datetime.date
-) -> list[dict[str, str]]:
-    trailing_start = end.replace(year=end.year - 1)
-    return query_csv(
-        database_dir,
-        "SELECT j.labels_json AS runner_label, COUNT(*) AS jobs, "
-        "ROUND(SUM(CASE WHEN j.completed_at > j.started_at THEN "
-        "TIMESTAMPDIFF(SECOND, j.started_at, j.completed_at) ELSE 0 END) / 60, 1) "
-        "AS cached_minutes, ROUND(SUM(CASE WHEN "
-        f"r.created_at >= '{trailing_start}' AND r.created_at < '{end}' "
-        "AND j.completed_at > j.started_at THEN "
-        "TIMESTAMPDIFF(SECOND, j.started_at, j.completed_at) ELSE 0 END) / 60, 1) "
-        "AS trailing_minutes FROM workflow_jobs j JOIN workflow_runs r "
-        "ON r.run_id = j.run_id GROUP BY j.labels_json ORDER BY j.labels_json;",
-    )
+def seasonal_forecast_values(
+    starting_level: float, release_growth: float, months: int = FORECAST_MONTHS
+) -> list[dict]:
+    phase_count = len(RELEASE_PHASES)
+    if months % phase_count:
+        raise ValueError("Forecast length must contain complete release cycles")
+    values = []
+    for cycle_start in range(0, months, phase_count):
+        release_cycle = cycle_start // phase_count + 1
+        trend_level = starting_level + release_growth * release_cycle
+        raw_values = [trend_level * multiplier for _, multiplier in RELEASE_PHASES]
+        scale = trend_level * phase_count / sum(raw_values)
+        for offset, (phase, multiplier) in enumerate(RELEASE_PHASES):
+            values.append(
+                {
+                    "forecast_month": cycle_start + offset + 1,
+                    "release_cycle": release_cycle,
+                    "release_phase": phase,
+                    "release_phase_multiplier": multiplier,
+                    "trend_level": trend_level,
+                    "seasonal_value": raw_values[offset] * scale,
+                }
+            )
+    return values
 
 
-def yearly_forecast(
-    predictor: Callable[[float], float], observed_months: int
-) -> list[float]:
-    monthly = [predictor(observed_months + index) for index in range(FORECAST_MONTHS)]
-    return [sum(monthly[index : index + 12]) for index in range(0, 60, 12)]
-
-
-def is_plausible_long_horizon(result: ModelResult, values: Sequence[float]) -> bool:
-    forecast = yearly_forecast(result.fit, len(values))
-    recent_annual = statistics.fmean(values[-24:]) * 12
-    return (
-        forecast[-1] >= max(1.0, recent_annual * 0.25)
-        and forecast[-1] <= recent_annual * 4
-    )
-
-
-def correlation(xs: Sequence[float], ys: Sequence[float]) -> float:
+def least_squares_line(
+    xs: Sequence[float], values: Sequence[float]
+) -> tuple[float, float]:
+    if len(xs) != len(values) or len(xs) < 2:
+        raise ValueError("A trend line requires at least two paired values")
     x_mean = statistics.fmean(xs)
-    y_mean = statistics.fmean(ys)
-    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
-    x_scale = math.sqrt(sum((x - x_mean) ** 2 for x in xs))
-    y_scale = math.sqrt(sum((y - y_mean) ** 2 for y in ys))
-    return numerator / (x_scale * y_scale) if x_scale and y_scale else 0.0
-
-
-def render_report(database_dir: Path, report_path: Path):
-    start, end = complete_month_bounds(database_dir)
-    monthly = monthly_trigger_counts(database_dir, start, end)
-    values = [value for _, value in monthly]
-    results = evaluate_models(values)
-    plausible_results = [
-        result for result in results if is_plausible_long_horizon(result, values)
-    ]
-    if not plausible_results:
-        raise RuntimeError("No forecast model passed the long-horizon guardrail")
-    selected = plausible_results[0]
-    forecast = yearly_forecast(selected.fit, len(values))
-    actual_runs = actual_workflow_counts(database_dir)
-    runner_usage = runner_usage_by_label(database_dir, end)
-    overlap = [
-        (month, int(value), actual_runs[month.isoformat()])
-        for month, value in monthly
-        if month.isoformat() in actual_runs
-    ]
-    overlap_proxy = sum(item[1] for item in overlap)
-    overlap_actual = sum(item[2] for item in overlap)
-    calibration = overlap_actual / overlap_proxy if overlap_proxy else 1.0
-    proxy_predictions = [item[1] * calibration for item in overlap]
-    actual_values = [item[2] for item in overlap]
-    proxy_mae = statistics.fmean(
-        abs(predicted - actual)
-        for predicted, actual in zip(proxy_predictions, actual_values)
+    y_mean = statistics.fmean(values)
+    denominator = sum((x - x_mean) ** 2 for x in xs)
+    if denominator == 0:
+        raise ValueError("A trend line requires distinct x values")
+    slope = (
+        sum((x - x_mean) * (value - y_mean) for x, value in zip(xs, values))
+        / denominator
     )
-    proxy_correlation = correlation(
-        [float(item[1]) for item in overlap],
-        [float(item[2]) for item in overlap],
-    )
-    complete_actuals = [
-        count for month, count in sorted(actual_runs.items()) if month < end.isoformat()
-    ]
-    actual_baseline = statistics.fmean(complete_actuals[-12:]) * 12
+    intercept = y_mean - slope * x_mean
+    return slope, intercept
 
+
+def observed_release_trend(
+    actual_rows: Sequence[dict],
+) -> tuple[list[int], list[float], float, float]:
+    indexes = [
+        index
+        for index, row in enumerate(actual_rows)
+        if row["coverage_status"] in TREND_COVERAGE_STATUSES
+    ]
+    values = [
+        float(actual_rows[index]["events_including_reruns_per_30_4375_days"])
+        for index in indexes
+    ]
+    slope, intercept = least_squares_line(indexes, values)
+    return indexes, values, slope, intercept
+
+
+def forecast_release_rows(
+    actual_rows: Sequence[dict], release_count: int
+) -> list[dict]:
+    _, _, slope, intercept = observed_release_trend(actual_rows)
+    last_actual_index = len(actual_rows) - 1
+    last_fitted_value = intercept + slope * last_actual_index
+    rows = []
+    for offset in range(1, release_count + 1):
+        row = {"release_cycle": offset}
+        for scenario, multiplier in FORECAST_SCENARIO_GROWTH.items():
+            key = f"{scenario}_events_including_reruns"
+            value = last_fitted_value + slope * multiplier * offset
+            row[key] = value
+            row[f"{key}_per_release"] = value * len(RELEASE_PHASES)
+        rows.append(row)
+    return rows
+
+
+def render_release_forecast_svg(
+    actual_rows: Sequence[dict],
+    forecast_rows: Sequence[dict],
+    path: Path,
+):
+    actual_key = "events_including_reruns_per_30_4375_days"
+    actual_values = [float(row[actual_key]) for row in actual_rows]
+    trend_indexes, _, trend_slope, trend_intercept = observed_release_trend(actual_rows)
+    trend_values = [trend_intercept + trend_slope * index for index in trend_indexes]
+    forecast_series = {
+        scenario: [
+            float(row[f"{scenario}_events_including_reruns"]) for row in forecast_rows
+        ]
+        for scenario in FORECAST_SCENARIO_GROWTH
+    }
+    all_values = actual_values + [
+        value for values in forecast_series.values() for value in values
+    ]
+    axis_max, axis_step = nice_axis_max(max(all_values))
+    plot_left, plot_top = 90.0, 145.0
+    plot_width, plot_height = 1460.0, 480.0
+    total_points = len(actual_rows) + len(forecast_rows)
+
+    def point(index: float, value: float) -> tuple[float, float]:
+        x = plot_left + index * plot_width / (total_points - 1)
+        y = plot_top + plot_height - value / axis_max * plot_height
+        return x, y
+
+    def path_data(points: Sequence[tuple[float, float]]) -> str:
+        return " ".join(
+            f"{'M' if index == 0 else 'L'} {x:.1f} {y:.1f}"
+            for index, (x, y) in enumerate(points)
+        )
+
+    title = "OpenUSD Per-Release Trigger Rate Including Reruns: Actual and Forecast"
+    body = [
+        svg_text(55, 52, title, css_class="title"),
+        svg_text(
+            55,
+            82,
+            "Actual events per 30.4375 days by release, with fitted-trend "
+            "low/mid/high five-year scenarios.",
+            css_class="subtitle",
+        ),
+    ]
+    tick = 0.0
+    while tick <= axis_max + 1e-9:
+        y = plot_top + plot_height - tick / axis_max * plot_height
+        body.append(
+            f'<line x1="{plot_left:.1f}" y1="{y:.1f}" '
+            f'x2="{plot_left + plot_width:.1f}" y2="{y:.1f}" class="grid" />'
+        )
+        body.append(
+            svg_text(
+                plot_left - 12,
+                y + 4,
+                f"{tick:,.0f}",
+                css_class="axis",
+                anchor="end",
+            )
+        )
+        tick += axis_step
+    body.append(
+        f'<line x1="{plot_left:.1f}" y1="{plot_top + plot_height:.1f}" '
+        f'x2="{plot_left + plot_width:.1f}" y2="{plot_top + plot_height:.1f}" '
+        'class="axis-line" />'
+    )
+    forecast_start = len(actual_rows)
+    for year in range(1, FORECAST_YEARS + 1):
+        boundary_index = forecast_start + year * RELEASES_PER_YEAR - 1
+        x, _ = point(boundary_index, 0)
+        body.append(
+            f'<line x1="{x:.1f}" y1="{plot_top:.1f}" x2="{x:.1f}" '
+            f'y2="{plot_top + plot_height:.1f}" class="grid" />'
+        )
+
+    actual_points = [point(index, value) for index, value in enumerate(actual_values)]
+    body.append(
+        f'<path d="{path_data(actual_points)}" fill="none" stroke="#24292f" '
+        'stroke-width="3" />'
+    )
+    coverage_colors = {
+        "complete": "#24292f",
+        "in_progress": "#0969da",
+        "partial": "#bf8700",
+    }
+    for index, (row, (x, y)) in enumerate(zip(actual_rows, actual_points)):
+        body.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" '
+            f'fill="{coverage_colors[row["coverage_status"]]}" />'
+        )
+        label_y = plot_top + plot_height + 26 + (index % 2) * 18
+        body.append(
+            svg_text(
+                x,
+                label_y,
+                row["release_cycle"],
+                css_class="axis",
+                anchor="middle",
+            )
+        )
+
+    trend_points = [
+        point(index, value) for index, value in zip(trend_indexes, trend_values)
+    ]
+    body.append(
+        f'<path d="{path_data(trend_points)}" fill="none" stroke="#6e7781" '
+        'stroke-width="2" stroke-dasharray="8 5" />'
+    )
+    divider_x, _ = point(forecast_start - 0.5, 0)
+    body.append(
+        f'<line x1="{divider_x:.1f}" y1="{plot_top:.1f}" x2="{divider_x:.1f}" '
+        f'y2="{plot_top + plot_height:.1f}" stroke="#57606a" stroke-width="2" />'
+    )
+    body.append(
+        svg_text(divider_x + 8, plot_top + 16, "Projected releases", css_class="axis")
+    )
+    colors = {"low": "#1f883d", "mid": "#0969da", "high": "#bf8700"}
+    forecast_line_style = ' stroke-dasharray="2 6" stroke-linecap="round"'
+    last_actual_index = len(actual_rows) - 1
+    fitted_boundary = trend_intercept + trend_slope * last_actual_index
+    for scenario, values in forecast_series.items():
+        points = [point(last_actual_index, fitted_boundary)] + [
+            point(forecast_start + index, value) for index, value in enumerate(values)
+        ]
+        body.append(
+            f'<path d="{path_data(points)}" fill="none" '
+            f'stroke="{colors[scenario]}" stroke-width="3"'
+            f"{forecast_line_style} />"
+        )
+    marker_offsets = {"low": 16, "mid": -10, "high": -10}
+    for forecast_year in (1, FORECAST_YEARS):
+        release_index = forecast_year * RELEASES_PER_YEAR - 1
+        chart_index = forecast_start + release_index
+        for scenario, values in forecast_series.items():
+            x, y = point(chart_index, values[release_index])
+            body.append(
+                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" '
+                f'fill="{colors[scenario]}" stroke="#ffffff" stroke-width="2" />'
+            )
+            body.append(
+                svg_text(
+                    x + 8,
+                    y + marker_offsets[scenario],
+                    f"{values[release_index]:.0f}",
+                    css_class="axis",
+                )
+            )
+    for year in range(1, FORECAST_YEARS + 1):
+        center_index = forecast_start + (year - 1) * RELEASES_PER_YEAR + 1.5
+        x, _ = point(center_index, 0)
+        body.append(
+            svg_text(
+                x,
+                plot_top + plot_height + 26,
+                f"Forecast year {year}",
+                css_class="axis",
+                anchor="middle",
+            )
+        )
+
+    legend = [
+        ("#24292f", "Actual", ""),
+        ("#6e7781", "Observed trend", ' stroke-dasharray="8 5"'),
+        (
+            colors["low"],
+            f"Low ({FORECAST_SCENARIO_GROWTH['low']:.0%} slope)",
+            forecast_line_style,
+        ),
+        (
+            colors["mid"],
+            f"Mid ({FORECAST_SCENARIO_GROWTH['mid']:.0%} slope)",
+            forecast_line_style,
+        ),
+        (
+            colors["high"],
+            f"High ({FORECAST_SCENARIO_GROWTH['high']:.0%} slope)",
+            forecast_line_style,
+        ),
+    ]
+    legend_x = 90
+    for color, label, dash_attribute in legend:
+        body.append(
+            f'<line x1="{legend_x}" y1="716" x2="{legend_x + 24}" y2="716" '
+            f'stroke="{color}" stroke-width="4"{dash_attribute} />'
+        )
+        body.append(svg_text(legend_x + 32, 721, label, css_class="note"))
+        legend_x += 260
+    body.append(
+        svg_text(
+            90,
+            775,
+            "Partial actual cycles are gold; the current in-progress cycle is blue. "
+            "The trend line uses complete and in-progress cycles.",
+            css_class="note",
+        )
+    )
+    path.write_text(
+        svg_document(
+            title, "Actual and projected per-release monthly trigger rates.", body
+        ),
+        encoding="utf-8",
+    )
+
+
+def annual_release_forecast_totals(release_rows: Sequence[dict]) -> list[dict]:
+    totals = []
+    for year_index in range(FORECAST_YEARS):
+        year_rows = release_rows[
+            year_index * RELEASES_PER_YEAR : (year_index + 1) * RELEASES_PER_YEAR
+        ]
+        row = {"year": year_index + 1}
+        for scenario in FORECAST_SCENARIO_GROWTH:
+            key = f"{scenario}_events_including_reruns_per_release"
+            row[scenario] = sum(item[key] for item in year_rows)
+        totals.append(row)
+    return totals
+
+
+def render_report(
+    database_dir: Path,
+    report_path: Path,
+    forecast_csv_path: Path,
+    effective_release_forecast_svg_path: Path,
+):
+    release_rows = release_triggering_event_rows(database_dir)
+    actual_rows = observed_monthly_trigger_rows(database_dir)
+    starting_level = forecast_baseline(release_rows)
+    _, _, fitted_slope, fitted_intercept = observed_release_trend(release_rows)
+    release_forecast_rows = forecast_release_rows(release_rows, FORECAST_RELEASES)
+    csv_rows = [
+        {
+            key: f"{value:.1f}" if isinstance(value, float) else value
+            for key, value in row.items()
+        }
+        for row in release_forecast_rows
+    ]
+    write_csv(forecast_csv_path, tuple(csv_rows[0]), csv_rows)
+    render_release_forecast_svg(
+        release_rows,
+        release_forecast_rows,
+        effective_release_forecast_svg_path,
+    )
+    annual = annual_release_forecast_totals(release_forecast_rows)
+    five_year = {
+        scenario: sum(row[scenario] for row in annual)
+        for scenario in FORECAST_SCENARIO_GROWTH
+    }
+    fitted_boundary = fitted_intercept + fitted_slope * (len(release_rows) - 1)
     metadata_rows = query_csv(
         database_dir,
         "SELECT meta_key, meta_value FROM sync_metadata ORDER BY meta_key;",
     )
     metadata = {row["meta_key"]: row["meta_value"] for row in metadata_rows}
-    actual_months = sorted(actual_runs)
-    actual_start = actual_months[0] if actual_months else "unknown"
-    actual_end = actual_months[-1] if actual_months else "unknown"
+    phase_values = seasonal_forecast_values(starting_level, 0.0, 3)
     lines = [
-        "# OpenUSD Pull-Request Activity and GitHub Actions Forecast",
+        "# OpenUSD GitHub Actions Trigger Forecast",
         "",
         f"Generated: {datetime.date.today().isoformat()}",
         "",
-        "## Data coverage",
+        "## Forecast basis",
         "",
-        f"- Repository ID: `{REPOSITORY_ID}`",
-        f"- Historical names: `PixarAnimationStudios/USD` and `{REPOSITORY}`",
-        f"- Pull-request event source: {metadata.get('pr_events_source', 'unknown')}",
+        "The forecast uses inferred source-trigger events from cached GitHub Actions",
+        "runs. Runs sharing a source identity within five minutes count once. Reruns",
+        "are clustered separately and included in every forecast value.",
+        "",
+        f"The current release-cycle rate rounds to **{starting_level:.0f} triggering",
+        "events including reruns** per 30.4375 days.",
+        "The forecast starts at the least-squares line's value at the current",
+        "release boundary. Its linear slopes do not compound exponentially.",
+        "",
+        "Partial release cycles are excluded from the fit because their event counts",
+        "are incomplete.",
+        "",
+        f"The fitted boundary is **{fitted_boundary:.1f} events/month**, and the",
+        f"observed slope is **{fitted_slope:.1f} events/month per release**.",
+        "",
         (
-            "- Cached PR-event range:"
-            f" {metadata.get('pr_events_start_date', 'unknown')} through"
-            f" {metadata.get('pr_events_end_date_exclusive', 'unknown')} (exclusive)"
+            "| Scenario | Observed slope retained | Increase per release | "
+            "Five-year events including reruns |"
         ),
-        (
-            f"- Complete months modeled: {start} through"
-            f" {end - datetime.timedelta(days=1)}"
-        ),
-        f"- Complete monthly observations: {len(values)}",
-        "- `BuildUSD` workflow record created: 2024-09-09",
-        f"- Cached `BuildUSD` run months: {actual_start} through {actual_end}",
-        (
-            "- Cached workflows/runs/jobs: "
-            f"{metadata.get('actions_workflow_count', 'unknown')}/"
-            f"{metadata.get('actions_run_count', 'unknown')}/"
-            f"{metadata.get('actions_job_count', 'unknown')}"
-        ),
-        (
-            "- Cached PR timelines/events: "
-            f"{metadata.get('pr_timeline_pr_count', 'unknown')}/"
-            f"{metadata.get('pr_timeline_event_count', 'unknown')}"
-        ),
-        "",
-        "The stable five-year demand proxy counts PR openings and reopenings. GitHub",
-        "Actions also uses `synchronize` as a default `pull_request` activity, but",
-        "GitHub's historical APIs do not expose exact push timestamps for that event.",
-        "The cached timeline commits use author/committer dates and are therefore not",
-        "treated as exact workflow triggers. Calibration against actual runs absorbs",
-        "the average effect of synchronizations and reruns during the overlap period.",
-        "",
-        "## Model comparison",
-        "",
-        "Models were compared over the latest 24 observations using expanding-window,",
-        "one-month-ahead validation. A long-horizon guardrail rejects a model when its",
-        "Year 5 forecast is below 25% or above 400% of the recent annualized mean.",
-        "The lowest-MAE model that passes the guardrail is selected.",
-        "",
-        "| Model | Validation MAE | Validation RMSE | Guardrail |",
-        "|---|---:|---:|---|",
+        "|---|---:|---:|---:|",
     ]
-    for result in results:
-        guardrail = "pass" if result in plausible_results else "reject"
+    for scenario, multiplier in FORECAST_SCENARIO_GROWTH.items():
         lines.append(
-            f"| {result.name} | {result.mae:.2f} | {result.rmse:.2f} | {guardrail} |"
+            f"| {scenario.title()} | {multiplier:.0%} | "
+            f"+{fitted_slope * multiplier:.1f} | "
+            f"{five_year[scenario]:,.0f} |"
         )
     lines.extend(
         [
             "",
-            f"Selected model: **{selected.name}**.",
+            "## Release-cycle seasonality",
             "",
-            "## Five-year trigger forecast",
+            "The recent burst is modeled as release-cycle seasonality rather than a",
+            "permanent increase in the trend. Each projected release cycle has three",
+            "equal 30.4375-day phases. Phase values are normalized within every cycle",
+            "so seasonality changes timing and peak capacity, not the scenario total.",
             "",
-            (
-                "| Forecast year | PR-trigger proxy | Calibrated proxy runs | "
-                "Flat actual-run baseline |"
-            ),
-            "|---|---:|---:|---:|",
-        ]
-    )
-    for year, value in enumerate(forecast, 1):
-        lines.append(
-            f"| Year {year} | {value:,.0f} | {value * calibration:,.0f} | "
-            f"{actual_baseline:,.0f} |"
-        )
-    lines.extend(
-        [
-            "",
-            "## Runner-minute baseline",
-            "",
-            "The most defensible near-term capacity baseline is the measured runner",
-            "time from the latest 12 complete months. The five-year column holds that",
-            "annual workload flat; it includes both PR and push workflow runs.",
-            "",
-            (
-                "| Runner label | Cached jobs | Cached minutes | Latest 12-month"
-                " minutes | Five-year flat minutes |"
-            ),
-            "|---|---:|---:|---:|---:|",
-        ]
-    )
-    for usage in runner_usage:
-        trailing_minutes = float(usage["trailing_minutes"])
-        lines.append(
-            f"| `{usage['runner_label']}` | {int(usage['jobs']):,} | "
-            f"{float(usage['cached_minutes']):,.0f} | {trailing_minutes:,.0f} | "
-            f"{trailing_minutes * 5:,.0f} |"
-        )
-    lines.extend(
-        [
-            "",
-            "## Proxy validation against actual BuildUSD runs",
-            "",
-            f"Across {len(overlap)} overlapping complete months, the proxy counted",
-            f"{overlap_proxy:,} trigger events and GitHub recorded {overlap_actual:,}",
-            f"pull-request workflow runs. The resulting calibration factor is",
-            f"**{calibration:.3f} actual runs per proxy trigger**.",
-            "",
-            f"The monthly proxy-to-run correlation is **{proxy_correlation:.3f}**,",
-            f"and its calibrated monthly MAE is **{proxy_mae:.1f} runs**. A weak or",
-            "negative correlation means the calibrated proxy is not suitable as a",
-            "standalone point estimate. The flat baseline annualizes the latest 12",
-            (
-                f"complete months of actual workflow data to **{actual_baseline:,.0f}"
-                " runs**."
-            ),
-            "",
-            "| Month | Trigger proxy | Actual PR workflow runs |",
+            "| Release phase | Multiplier | Events/month at the current level |",
             "|---|---:|---:|",
         ]
     )
-    for month, proxy, actual in overlap:
-        lines.append(f"| {month:%Y-%m} | {proxy} | {actual} |")
+    for value in phase_values:
+        lines.append(
+            f"| {value['release_phase'].title()} | "
+            f"{value['release_phase_multiplier']:.1f}x | "
+            f"{value['seasonal_value']:.0f} |"
+        )
     lines.extend(
         [
             "",
+            "The cycle average is the cost-planning quantity. The late-cycle value",
+            "is the runner-capacity quantity.",
+            "",
+            "## Annual totals",
+            "",
+            "| Year | Low incl. reruns | Mid incl. reruns | High incl. reruns |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for row in annual:
+        lines.append(
+            f"| Year {row['year']} | "
+            f"{row['low']:,.0f} | "
+            f"{row['mid']:,.0f} | "
+            f"{row['high']:,.0f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Observed release-cycle rates",
+            "",
+            "| Release cycle | Coverage | Events including reruns/month |",
+            "|---|---|---:|",
+        ]
+    )
+    for row in release_rows:
+        lines.append(
+            f"| {row['release_cycle']} | {row['coverage_status']} | "
+            f"{float(row['events_including_reruns_per_30_4375_days']):.1f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Generated forecast artifacts",
+            "",
+            (
+                f"- `{forecast_csv_path.name}`: {FORECAST_RELEASES} projected "
+                "release cycles, with monthly rates and three-month totals"
+            ),
+            (
+                f"- `{effective_release_forecast_svg_path.name}`: rates including "
+                "reruns by actual and projected release"
+            ),
+            "",
+            "The SVG shows actual per-release monthly rates, a least-squares line over",
+            (
+                "the complete and in-progress cycles, and "
+                f"{FORECAST_RELEASES} projected release-cycle"
+            ),
+            "averages. Inner-release monthly seasonality is intentionally omitted.",
+            "",
             "## Limitations",
             "",
-            "- Pull-request activity predicts workflow starts, not runner duration.",
-            "- Openings/reopenings are a coarse proxy for synchronization-heavy PRs;",
-            "  inspect the monthly validation table before using the point forecast.",
+            "- The scenario slopes and phase multipliers are planning assumptions",
             (
-                "- Timeline commit events do not preserve exact push times or how"
-                " commits were"
+                "  grounded in the available Actions observations, not statistically"
+                " stable"
             ),
+            "  estimates from many release cycles.",
+            "- Refit the level and reconsider the slopes after each completed release.",
+            "- Trigger forecasts do not predict another workflow's duration. Apply",
+            "  platform-specific job times when converting events into runner minutes.",
+            "- Workflow configuration and triggering rules can change.",
+            "",
+            "## Data coverage and reproducibility",
+            "",
+            f"- Repository ID: `{REPOSITORY_ID}`",
+            f"- Repository: `{REPOSITORY}`",
             (
-                "  grouped into pushes, so they are cached but excluded from trigger"
-                " counts."
+                "- Cached Actions range ends: "
+                f"{metadata.get('actions_end_date_exclusive', 'unknown')} (exclusive)"
             ),
-            "- The workflow excludes changes limited to `.github/workflows/**`.",
-            "- Workflow configuration, job count, and runner speed can change.",
-            "- Five-year extrapolation is substantially more uncertain than the",
-            "  one-month validation used to select the model.",
-            "- Cost forecasts should multiply predicted runs by measured job duration",
-            "  from the cached Actions jobs, not by an assumed one-hour runtime.",
-            "",
-            "## Database and reproducibility",
-            "",
-            "The embedded Dolt database is `.cache/openusd_usage_dolt`. It is ignored",
-            "by Git, while its internal Dolt commits preserve each completed import",
-            "as a queryable data snapshot. Python dependencies are locked with `uv`.",
-            "No Dolt SQL server is required or started.",
+            f"- Complete monthly Actions observations: {len(actual_rows)}",
+            (
+                "- Cached workflows/runs/jobs: "
+                f"{metadata.get('actions_workflow_count', 'unknown')}/"
+                f"{metadata.get('actions_run_count', 'unknown')}/"
+                f"{metadata.get('actions_job_count', 'unknown')}"
+            ),
             "",
             "```bash",
-            "./run_openusd_usage.sh sync-all --start-date 2021-09-16",
             "./run_openusd_usage.sh report",
-            "dolt -C .cache/openusd_usage_dolt log --oneline",
             "```",
-            "",
-            "Dolt 2.3 supports Git-backed database remotes. This database is pushed",
-            "to the existing GitHub repository through its separate `refs/dolt/data`",
-            "ref, so the database history coexists with and does not alter Git",
-            "`main`. The configured remote is:",
-            "",
-            "```text",
-            (
-                "git+ssh://git@github.com/./pmolodo/"
-                "USD-performance-metrics-github-runners-notes.git"
-            ),
-            "```",
-            "",
-            "After a successful sync, publish the new Dolt commits with:",
-            "",
-            "```bash",
-            "dolt -C .cache/openusd_usage_dolt push",
-            "```",
-            "",
-            "To reconstruct the cache in a fresh source checkout:",
-            "",
-            "```bash",
-            (
-                "dolt clone git@github.com:pmolodo/"
-                "USD-performance-metrics-github-runners-notes.git "
-                ".cache/openusd_usage_dolt"
-            ),
-            "```",
-            "",
-            "See Dolt's [Git remote URL implementation][dolt-git-remote] and",
-            "[Git remote integration tests][dolt-git-remote-tests].",
-            "",
-            (
-                "[dolt-git-remote]: "
-                "https://github.com/dolthub/dolt/blob/main/go/libraries/"
-                "doltcore/env/git_remote_url.go"
-            ),
-            (
-                "[dolt-git-remote-tests]: "
-                "https://github.com/dolthub/dolt/blob/main/integration-tests/"
-                "bats/remotes-git.bats"
-            ),
             "",
         ]
     )
     report_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote {report_path}")
+    print(f"Wrote {forecast_csv_path}")
+    print(f"Wrote {effective_release_forecast_svg_path}")
 
 
 ###############################################################################
@@ -2059,6 +2148,12 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--database-dir", type=Path, default=DEFAULT_DATABASE_DIR)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--forecast-csv", type=Path, default=DEFAULT_FORECAST_CSV)
+    parser.add_argument(
+        "--effective-release-forecast-svg",
+        type=Path,
+        default=DEFAULT_EFFECTIVE_RELEASE_FORECAST_SVG,
+    )
     parser.add_argument("--release-csv", type=Path, default=DEFAULT_RELEASE_CSV)
     parser.add_argument("--release-svg", type=Path, default=DEFAULT_RELEASE_SVG)
     parser.add_argument(
@@ -2100,7 +2195,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command in ("sync-releases", "sync-all"):
             sync_releases(database_dir, stage_dir)
         if args.command in ("report", "sync-all"):
-            render_report(database_dir, args.report.resolve())
+            render_report(
+                database_dir,
+                args.report.resolve(),
+                args.forecast_csv.resolve(),
+                args.effective_release_forecast_svg.resolve(),
+            )
         if args.command == "export-releases":
             export_release_triggering_events(
                 database_dir,

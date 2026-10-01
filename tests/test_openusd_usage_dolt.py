@@ -6,6 +6,8 @@ import datetime
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import openusd_usage_dolt
@@ -81,3 +83,46 @@ def test_core_build_family_accepts_only_exact_summary_jobs():
         )
         is None
     )
+
+
+def test_seasonal_forecast_preserves_cycle_total():
+    values = openusd_usage_dolt.seasonal_forecast_values(67, 0.5, months=3)
+
+    assert [value["release_phase"] for value in values] == [
+        "early",
+        "middle",
+        "late",
+    ]
+    assert sum(value["seasonal_value"] for value in values) == pytest.approx(
+        sum(value["trend_level"] for value in values)
+    )
+    assert values[0]["seasonal_value"] < values[1]["seasonal_value"]
+    assert values[1]["seasonal_value"] < values[2]["seasonal_value"]
+
+
+def test_release_forecast_continues_observed_trend():
+    actual_rows = [
+        {
+            "coverage_status": "partial",
+            "events_including_reruns_per_30_4375_days": 999,
+        },
+        {
+            "coverage_status": "complete",
+            "events_including_reruns_per_30_4375_days": 10,
+        },
+        {
+            "coverage_status": "complete",
+            "events_including_reruns_per_30_4375_days": 20,
+        },
+        {
+            "coverage_status": "in_progress",
+            "events_including_reruns_per_30_4375_days": 30,
+        },
+    ]
+
+    rows = openusd_usage_dolt.forecast_release_rows(actual_rows, 2)
+
+    assert rows[0]["low_events_including_reruns"] == pytest.approx(32.5)
+    assert rows[0]["mid_events_including_reruns"] == pytest.approx(35)
+    assert rows[0]["high_events_including_reruns"] == pytest.approx(40)
+    assert rows[1]["high_events_including_reruns"] == pytest.approx(50)
