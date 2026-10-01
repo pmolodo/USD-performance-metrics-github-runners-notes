@@ -54,6 +54,8 @@ TRIGGER_ACTIONS = ("opened", "synchronize", "reopened")
 # collection starts here. Treat earlier months as unavailable or partial.
 COMPLETE_TRIGGER_COVERAGE_START = datetime.date(2025, 9, 1)
 TRIGGER_CLUSTER_MINUTES = 5
+SVG_CANVAS_WIDTH = 1600
+SVG_CANVAS_HEIGHT = 820
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sync_metadata (
@@ -1104,8 +1106,9 @@ def svg_document(title: str, subtitle: str, body: Iterable[str]) -> str:
     return "\n".join(
         [
             (
-                '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" '
-                'viewBox="0 0 1600 820" role="img">'
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{SVG_CANVAS_WIDTH}" '
+                f'height="{SVG_CANVAS_HEIGHT}" '
+                f'viewBox="0 0 {SVG_CANVAS_WIDTH} {SVG_CANVAS_HEIGHT}" role="img">'
             ),
             f"<title>{html.escape(title)}</title>",
             f"<desc>{html.escape(subtitle)}</desc>",
@@ -1119,6 +1122,10 @@ def svg_document(title: str, subtitle: str, body: Iterable[str]) -> str:
             ".grid { stroke: #d0d7de; stroke-width: 1; }",
             ".axis-line { stroke: #57606a; stroke-width: 1.5; }",
             "</style>",
+            (
+                f'<rect width="{SVG_CANVAS_WIDTH}" height="{SVG_CANVAS_HEIGHT}" '
+                'fill="#ffffff" />'
+            ),
             *body,
             "</svg>",
             "",
@@ -1253,8 +1260,6 @@ def render_trigger_count_svg(rows: Sequence[dict], path: Path):
             svg_text(271, 724, "Source events plus reruns", css_class="note"),
             '<rect x="500" y="710" width="18" height="18" fill="#fff8c5" />',
             svg_text(526, 724, "Partial coverage", css_class="note"),
-            '<rect x="680" y="710" width="18" height="18" fill="#f6f8fa" />',
-            svg_text(706, 724, "Unavailable", css_class="note"),
             svg_text(
                 90,
                 775,
@@ -1358,8 +1363,9 @@ def export_monthly_triggering_events(
     rows = monthly_triggering_event_rows(database_dir, start, end)
     fieldnames = tuple(rows[0])
     write_csv(csv_path, fieldnames, rows)
-    render_trigger_count_svg(rows, svg_path)
-    render_compute_svg(rows, compute_svg_path)
+    svg_rows = [row for row in rows if row["coverage_status"] != "unavailable"]
+    render_trigger_count_svg(svg_rows, svg_path)
+    render_compute_svg(svg_rows, compute_svg_path)
     print(f"Wrote {csv_path}")
     print(f"Wrote {svg_path}")
     print(f"Wrote {compute_svg_path}")
