@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820" role="img">
+<title>Core BuildUSD runner-minute rate by release</title>
+<desc>Core platform runner minutes by OpenUSD release cycle.</desc>
+<style>
+text { font-family: Arial, sans-serif; fill: #24292f; }
+.title { font-size: 28px; font-weight: 700; }
+.subtitle { font-size: 16px; fill: #57606a; }
+.axis { font-size: 13px; fill: #57606a; }
+.value { font-size: 11px; font-weight: 700; }
+.note { font-size: 14px; fill: #57606a; }
+.grid { stroke: #d0d7de; stroke-width: 1; }
+.axis-line { stroke: #57606a; stroke-width: 1.5; }
+</style>
+<rect width="1600" height="820" fill="#ffffff" />
+<text x="55.0" y="52.0" text-anchor="start" class="title">Core Runner-Minute Rate by Release (30.4375 Days)</text>
+<text x="55.0" y="82.0" text-anchor="start" class="subtitle">Linux x64, macOS, and Windows build jobs only; Wasm and packaging are excluded.</text>
+<rect x="90.0" y="145.0" width="243.5" height="480.0" fill="#fff8c5" />
+<rect x="333.3" y="145.0" width="243.5" height="480.0" fill="#fff8c5" />
+<rect x="1306.7" y="145.0" width="243.5" height="480.0" fill="#ddf4ff" />
+<line x1="90.0" y1="625.0" x2="1550.0" y2="625.0" class="grid" />
+<text x="78.0" y="629.0" text-anchor="end" class="axis">0</text>
+<line x1="90.0" y1="465.0" x2="1550.0" y2="465.0" class="grid" />
+<text x="78.0" y="469.0" text-anchor="end" class="axis">2,000</text>
+<line x1="90.0" y1="305.0" x2="1550.0" y2="305.0" class="grid" />
+<text x="78.0" y="309.0" text-anchor="end" class="axis">4,000</text>
+<line x1="90.0" y1="145.0" x2="1550.0" y2="145.0" class="grid" />
+<text x="78.0" y="149.0" text-anchor="end" class="axis">6,000</text>
+<line x1="90.0" y1="625.0" x2="1550.0" y2="625.0" class="axis-line" />
+<text x="211.7" y="649.0" text-anchor="middle" class="axis">v25.08</text>
+<text x="211.7" y="668.0" text-anchor="middle" class="axis">3.08 months</text>
+<text x="455.0" y="649.0" text-anchor="middle" class="axis">v25.11</text>
+<text x="455.0" y="668.0" text-anchor="middle" class="axis">2.79 months</text>
+<text x="698.3" y="649.0" text-anchor="middle" class="axis">v26.03</text>
+<text x="698.3" y="668.0" text-anchor="middle" class="axis">4.05 months</text>
+<text x="941.7" y="649.0" text-anchor="middle" class="axis">v26.05</text>
+<text x="941.7" y="668.0" text-anchor="middle" class="axis">1.93 months</text>
+<text x="1185.0" y="649.0" text-anchor="middle" class="axis">v26.08</text>
+<text x="1185.0" y="668.0" text-anchor="middle" class="axis">2.85 months</text>
+<text x="1428.3" y="649.0" text-anchor="middle" class="axis">post-v26.08</text>
+<text x="1428.3" y="668.0" text-anchor="middle" class="axis">2.41 months</text>
+<rect x="114.3" y="622.1" width="64.9" height="2.9" fill="#1f883d" rx="1" />
+<text x="146.8" y="616.1" text-anchor="middle" class="value">37</text>
+<rect x="179.2" y="623.0" width="64.9" height="2.0" fill="#8250df" rx="1" />
+<text x="211.7" y="617.0" text-anchor="middle" class="value">25</text>
+<rect x="244.1" y="621.2" width="64.9" height="3.8" fill="#0969da" rx="1" />
+<text x="276.6" y="615.2" text-anchor="middle" class="value">48</text>
+<rect x="357.7" y="471.9" width="64.9" height="153.1" fill="#1f883d" rx="1" />
+<text x="390.1" y="465.9" text-anchor="middle" class="value">1,914</text>
+<rect x="422.6" y="474.6" width="64.9" height="150.4" fill="#8250df" rx="1" />
+<text x="455.0" y="468.6" text-anchor="middle" class="value">1,880</text>
+<rect x="487.4" y="416.1" width="64.9" height="208.9" fill="#0969da" rx="1" />
+<text x="519.9" y="410.1" text-anchor="middle" class="value">2,611</text>
+<rect x="601.0" y="525.4" width="64.9" height="99.6" fill="#1f883d" rx="1" />
+<text x="633.4" y="519.4" text-anchor="middle" class="value">1,245</text>
+<rect x="665.9" y="511.8" width="64.9" height="113.2" fill="#8250df" rx="1" />
+<text x="698.3" y="505.8" text-anchor="middle" class="value">1,416</text>
+<rect x="730.8" y="469.5" width="64.9" height="155.5" fill="#0969da" rx="1" />
+<text x="763.2" y="463.5" text-anchor="middle" class="value">1,944</text>
+<rect x="844.3" y="451.9" width="64.9" height="173.1" fill="#1f883d" rx="1" />
+<text x="876.8" y="445.9" text-anchor="middle" class="value">2,163</text>
+<rect x="909.2" y="467.4" width="64.9" height="157.6" fill="#8250df" rx="1" />
+<text x="941.7" y="461.4" text-anchor="middle" class="value">1,970</text>
+<rect x="974.1" y="301.7" width="64.9" height="323.3" fill="#0969da" rx="1" />
+<text x="1006.6" y="295.7" text-anchor="middle" class="value">4,041</text>
+<rect x="1087.7" y="456.2" width="64.9" height="168.8" fill="#1f883d" rx="1" />
+<text x="1120.1" y="450.2" text-anchor="middle" class="value">2,110</text>
+<rect x="1152.6" y="457.6" width="64.9" height="167.4" fill="#8250df" rx="1" />
+<text x="1185.0" y="451.6" text-anchor="middle" class="value">2,092</text>
+<rect x="1217.4" y="411.4" width="64.9" height="213.6" fill="#0969da" rx="1" />
+<text x="1249.9" y="405.4" text-anchor="middle" class="value">2,670</text>
+<rect x="1331.0" y="345.4" width="64.9" height="279.6" fill="#1f883d" rx="1" />
+<text x="1363.4" y="339.4" text-anchor="middle" class="value">3,495</text>
+<rect x="1395.9" y="375.0" width="64.9" height="250.0" fill="#8250df" rx="1" />
+<text x="1428.3" y="369.0" text-anchor="middle" class="value">3,125</text>
+<rect x="1460.8" y="486.6" width="64.9" height="138.4" fill="#0969da" rx="1" />
+<text x="1493.2" y="480.6" text-anchor="middle" class="value">1,730</text>
+<rect x="90" y="710" width="18" height="18" fill="#1f883d" />
+<text x="116.0" y="724.0" text-anchor="start" class="note">Linux x64</text>
+<rect x="215" y="710" width="18" height="18" fill="#8250df" />
+<text x="241.0" y="724.0" text-anchor="start" class="note">macOS</text>
+<rect x="340" y="710" width="18" height="18" fill="#0969da" />
+<text x="366.0" y="724.0" text-anchor="start" class="note">Windows</text>
+<rect x="500" y="710" width="18" height="18" fill="#fff8c5" />
+<text x="526.0" y="724.0" text-anchor="start" class="note">Partial coverage</text>
+<rect x="680" y="710" width="18" height="18" fill="#ddf4ff" />
+<text x="706.0" y="724.0" text-anchor="start" class="note">In progress</text>
+<text x="90.0" y="775.0" text-anchor="start" class="note">Raw jobs remain cached. Summary minutes include only exact BuildUSD jobs: Linux, macOS, and Windows.</text>
+</svg>
